@@ -151,7 +151,7 @@ async function authenticate() {
         const authUrl = oauth2Client.generateAuthUrl({
             access_type: 'offline',
             scope: [
-                'https://www.googleapis.com/auth/gmail.modify',
+                'https://www.googleapis.com/auth/gmail.modify', // Change to 'gmail.readonly' for read-only mode
                 'https://www.googleapis.com/auth/gmail.settings.basic'
             ],
         });
@@ -317,6 +317,9 @@ const DownloadAttachmentSchema = z.object({
     savePath: z.string().optional().describe("Directory path to save the attachment (defaults to current directory)"),
 });
 
+const GetThreadMessagesSchema = z.object({
+    threadId: z.string().describe("ID of the thread to retrieve all messages from"),
+});
 
 // Main function
 async function main() {
@@ -437,6 +440,17 @@ async function main() {
                 name: "download_attachment",
                 description: "Downloads an email attachment to a specified location",
                 inputSchema: zodToJsonSchema(DownloadAttachmentSchema),
+            },
+            {
+                name: "get_thread_messages",
+                description: `Retrieves all messages in a thread by thread ID.
+
+Use this tool when you need to find all related messages in a conversation thread - including replies, forwards, and the original message.
+
+Common use case: After reading an email with read_email (which returns Thread ID), use this tool to get all messages in that thread, then use batch_modify_emails to archive them all.
+
+Returns: Message ID, subject, sender, and date for each message in the thread.`,
+                inputSchema: zodToJsonSchema(GetThreadMessagesSchema),
             },
         ],
     }))
@@ -1181,6 +1195,62 @@ async function main() {
                                 },
                             ],
                         };
+                    }
+                }
+
+                case "get_thread_messages": {
+                    const validatedArgs = GetThreadMessagesSchema.parse(args);
+
+                    try {
+                        const response = await gmail.users.threads.get({
+                            userId: 'me',
+                            id: validatedArgs.threadId,
+                            format: 'metadata',
+                            metadataHeaders: ['Subject', 'From', 'Date'],
+                        });
+
+                        const messages = response.data.messages || [];
+
+                        if (messages.length === 0) {
+                            return {
+                                content: [{
+                                    type: "text",
+                                    text: `Thread ${validatedArgs.threadId} exists but contains no messages.`,
+                                }],
+                            };
+                        }
+
+                        const results = messages.map((msg) => {
+                            const headers = msg.payload?.headers || [];
+                            return {
+                                id: msg.id,
+                                threadId: msg.threadId,
+                                subject: headers.find(h => h.name === 'Subject')?.value || '',
+                                from: headers.find(h => h.name === 'From')?.value || '',
+                                date: headers.find(h => h.name === 'Date')?.value || '',
+                            };
+                        });
+
+                        return {
+                            content: [{
+                                type: "text",
+                                text: `Found ${results.length} message(s) in thread:\n\n` +
+                                    results.map(r =>
+                                        `ID: ${r.id}\nSubject: ${r.subject}\nFrom: ${r.from}\nDate: ${r.date}`
+                                    ).join('\n\n'),
+                            }],
+                        };
+                    } catch (error: any) {
+                        if (error.code === 404) {
+                            return {
+                                content: [{
+                                    type: "text",
+                                    text: `Thread ${validatedArgs.threadId} not found. Verify the thread ID is correct (get it from read_email output).`,
+                                }],
+                                isError: true,
+                            };
+                        }
+                        throw error;  // Re-throw for global error handler
                     }
                 }
 
