@@ -19,6 +19,7 @@ import os from 'os';
 import {createEmailMessage, createEmailWithNodemailer} from "./utl.js";
 import { createLabel, updateLabel, deleteLabel, listLabels, findLabelByName, getOrCreateLabel, GmailLabel } from "./label-manager.js";
 import { createFilter, listFilters, getFilter, deleteFilter, filterTemplates, GmailFilterCriteria, GmailFilterAction } from "./filter-manager.js";
+import { convert as htmlToText } from 'html-to-text';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -637,13 +638,35 @@ Returns: Message ID, subject, sender, and date for each message in the thread.`,
                     // Extract email content using the recursive function
                     const { text, html } = extractEmailContent(response.data.payload as GmailMessagePart || {});
 
-                    // Use plain text content if available, otherwise use HTML content
-                    // (optionally, you could implement HTML-to-text conversion here)
-                    let body = text || html || '';
+                    // Use plain text content if available, otherwise convert HTML to text
+                    let body = text;
+                    if (!body && html) {
+                        try {
+                            body = htmlToText(html, {
+                                wordwrap: false,
+                                selectors: [
+                                    { selector: 'img', format: 'skip' },
+                                    { selector: 'a', options: { ignoreHref: true } }
+                                ]
+                            });
+                        } catch (conversionError) {
+                            // Fallback: strip HTML tags with regex if html-to-text fails
+                            body = html
+                                .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+                                .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+                                .replace(/<[^>]+>/g, ' ')
+                                .replace(/\s+/g, ' ')
+                                .trim();
+                            body = `[Note: HTML conversion failed, showing simplified text]\n\n${body}`;
+                        }
+                    }
+                    body = body || '';
 
-                    // If we only have HTML content, add a note for the user
-                    const contentTypeNote = !text && html ?
-                        '[Note: This email is HTML-formatted. Plain text version not available.]\n\n' : '';
+                    // Truncate very large bodies to prevent token overflow
+                    const MAX_BODY_LENGTH = 50000;
+                    if (body.length > MAX_BODY_LENGTH) {
+                        body = body.substring(0, MAX_BODY_LENGTH) + `\n\n[Truncated: ${body.length - MAX_BODY_LENGTH} characters omitted]`;
+                    }
 
                     // Get attachment information
                     const attachments: EmailAttachment[] = [];
@@ -678,7 +701,7 @@ Returns: Message ID, subject, sender, and date for each message in the thread.`,
                         content: [
                             {
                                 type: "text",
-                                text: `Thread ID: ${threadId}\nSubject: ${subject}\nFrom: ${from}\nTo: ${to}\nDate: ${date}\n\n${contentTypeNote}${body}${attachmentInfo}`,
+                                text: `Thread ID: ${threadId}\nSubject: ${subject}\nFrom: ${from}\nTo: ${to}\nDate: ${date}\n\n${body}${attachmentInfo}`,
                             },
                         ],
                     };

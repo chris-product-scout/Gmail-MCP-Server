@@ -50,6 +50,7 @@
     "@types/mime-types": "^2.1.4",
     "google-auth-library": "^9.4.1",
     "googleapis": "^129.0.0",
+    "html-to-text": "^9.0.5",
     "mcp-evals": "^1.0.18",
     "mime-types": "^3.0.1",
     "nodemailer": "^7.0.3",
@@ -58,6 +59,7 @@
     "zod-to-json-schema": "^3.22.1"
   },
   "devDependencies": {
+    "@types/html-to-text": "^9.0.4",
     "@types/node": "^20.10.5",
     "@types/nodemailer": "^6.4.17",
     "typescript": "^5.3.3"
