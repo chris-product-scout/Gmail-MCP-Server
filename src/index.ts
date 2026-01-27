@@ -322,6 +322,10 @@ const GetThreadMessagesSchema = z.object({
     threadId: z.string().describe("ID of the thread to retrieve all messages from"),
 });
 
+const ArchiveThreadSchema = z.object({
+    threadId: z.string().describe("ID of the thread to archive (get this from read_email output)"),
+});
+
 // Main function
 async function main() {
     await loadCredentials();
@@ -452,6 +456,20 @@ Common use case: After reading an email with read_email (which returns Thread ID
 
 Returns: Message ID, subject, sender, and date for each message in the thread.`,
                 inputSchema: zodToJsonSchema(GetThreadMessagesSchema),
+            },
+            {
+                name: "archive_thread",
+                description: `Archives an entire email thread by removing the INBOX label from all messages.
+
+Use this tool when you want to archive an email conversation. This is the PREFERRED way to archive emails because it handles all messages in the thread atomically.
+
+How it works:
+- Gets all messages in the thread
+- Removes the INBOX label from each message
+- Returns success status with count of archived messages
+
+Get the threadId from read_email output (shown as "Thread ID: ...").`,
+                inputSchema: zodToJsonSchema(ArchiveThreadSchema),
             },
         ],
     }))
@@ -1274,6 +1292,80 @@ Returns: Message ID, subject, sender, and date for each message in the thread.`,
                             };
                         }
                         throw error;  // Re-throw for global error handler
+                    }
+                }
+
+                case "archive_thread": {
+                    const validatedArgs = ArchiveThreadSchema.parse(args);
+
+                    try {
+                        // Step 1: Get all messages in the thread
+                        const threadResponse = await gmail.users.threads.get({
+                            userId: 'me',
+                            id: validatedArgs.threadId,
+                            format: 'minimal',  // We only need message IDs
+                        });
+
+                        const messages = threadResponse.data.messages || [];
+
+                        if (messages.length === 0) {
+                            return {
+                                content: [{
+                                    type: "text",
+                                    text: `Thread ${validatedArgs.threadId} exists but contains no messages.`,
+                                }],
+                            };
+                        }
+
+                        const messageIds = messages.map(msg => msg.id!).filter(Boolean);
+
+                        // Step 2: Remove INBOX label from all messages
+                        const results = await Promise.all(
+                            messageIds.map(async (messageId) => {
+                                try {
+                                    await gmail.users.messages.modify({
+                                        userId: 'me',
+                                        id: messageId,
+                                        requestBody: {
+                                            removeLabelIds: ['INBOX'],
+                                        },
+                                    });
+                                    return { messageId, success: true };
+                                } catch (error: any) {
+                                    return { messageId, success: false, error: error.message };
+                                }
+                            })
+                        );
+
+                        const succeeded = results.filter(r => r.success);
+                        const failed = results.filter(r => !r.success);
+
+                        let resultText = `Thread archived successfully.\n`;
+                        resultText += `Messages archived: ${succeeded.length}\n`;
+                        resultText += `Message IDs: ${succeeded.map(r => r.messageId).join(', ')}`;
+
+                        if (failed.length > 0) {
+                            resultText += `\n\nFailed to archive ${failed.length} message(s):\n`;
+                            resultText += failed.map(r => `- ${r.messageId}: ${(r as any).error}`).join('\n');
+                        }
+
+                        return {
+                            content: [{
+                                type: "text",
+                                text: resultText,
+                            }],
+                        };
+                    } catch (error: any) {
+                        if (error.code === 404) {
+                            return {
+                                content: [{
+                                    type: "text",
+                                    text: `Thread ${validatedArgs.threadId} not found. Verify the thread ID is correct (get it from read_email output).`,
+                                }],
+                                isError: true,
+                            };
+                        }
+                        throw error;
                     }
                 }
 
