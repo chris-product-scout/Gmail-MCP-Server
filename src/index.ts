@@ -94,6 +94,103 @@ function extractEmailContent(messagePart: GmailMessagePart): EmailContent {
     return { text: textContent, html: htmlContent };
 }
 
+/**
+ * Extract body text from a Gmail message payload.
+ * Prefers plain text, falls back to HTML-to-text conversion, then regex strip.
+ */
+function getBodyText(payload: GmailMessagePart, maxLength: number = 50000): string {
+    const { text, html } = extractEmailContent(payload);
+    let body = text;
+    if (!body && html) {
+        try {
+            body = htmlToText(html, {
+                wordwrap: false,
+                selectors: [
+                    { selector: 'img', format: 'skip' },
+                    { selector: 'a', options: { ignoreHref: true } }
+                ]
+            });
+        } catch {
+            body = html
+                .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+                .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+                .replace(/<[^>]+>/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+            body = `[Note: HTML conversion failed, showing simplified text]\n\n${body}`;
+        }
+    }
+    body = body || '';
+    if (maxLength > 0 && body.length > maxLength) {
+        body = body.substring(0, maxLength) + `\n\n[Truncated: ${body.length - maxLength} characters omitted]`;
+    }
+    return body;
+}
+
+/**
+ * Build a multipart/mixed batch request body for the Gmail batch API.
+ */
+function buildBatchRequest(messageIds: string[]): { body: string; boundary: string } {
+    const boundary = `batch_${Date.now()}_${Math.random().toString(36).substring(2)}`;
+    const parts = messageIds.map(id =>
+        `--${boundary}\r\nContent-Type: application/http\r\nContent-ID: <${id}>\r\n\r\nGET /gmail/v1/users/me/messages/${id}?format=full\r\n`
+    );
+    const body = parts.join('\r\n') + `\r\n--${boundary}--`;
+    return { body, boundary };
+}
+
+/**
+ * Parse a Gmail batch API multipart response into individual message results.
+ * IMPORTANT: The boundary must be extracted from the response Content-Type header,
+ * NOT reused from the request — Google generates its own boundary in the response.
+ */
+function parseBatchResponse(responseText: string, boundary: string): Array<{ id: string; data?: any; error?: string }> {
+    const results: Array<{ id: string; data?: any; error?: string }> = [];
+    const parts = responseText.split(`--${boundary}`);
+
+    for (const part of parts) {
+        const trimmed = part.trim();
+        if (!trimmed || trimmed === '--') continue;
+
+        // Extract Content-ID from the MIME part headers (maps back to our request ID)
+        const contentIdMatch = trimmed.match(/Content-ID:\s*<?\s*response-([^>\s]+)/i);
+        const contentId = contentIdMatch ? contentIdMatch[1] : null;
+
+        // Find the blank line that separates MIME headers from the HTTP response
+        const httpResponseStart = trimmed.indexOf('\r\n\r\n');
+        if (httpResponseStart === -1) continue;
+
+        const httpResponse = trimmed.substring(httpResponseStart + 4);
+
+        // The HTTP response itself has a status line, headers, then body
+        const bodyStart = httpResponse.indexOf('\r\n\r\n');
+        if (bodyStart === -1) continue;
+
+        const statusLine = httpResponse.substring(0, httpResponse.indexOf('\r\n'));
+        const statusMatch = statusLine.match(/HTTP\/[\d.]+ (\d+)/);
+        const statusCode = statusMatch ? parseInt(statusMatch[1]) : 0;
+
+        const jsonBody = httpResponse.substring(bodyStart + 4).trim();
+
+        try {
+            const data = JSON.parse(jsonBody);
+            if (statusCode === 200) {
+                results.push({ id: data.id, data });
+            } else {
+                // Use Content-ID to identify which request failed, fall back to response body
+                results.push({
+                    id: data.id || contentId || 'unknown',
+                    error: `HTTP ${statusCode}: ${data.error?.message || 'Unknown error'}`
+                });
+            }
+        } catch {
+            results.push({ id: contentId || 'unknown', error: `Failed to parse response part (HTTP ${statusCode})` });
+        }
+    }
+
+    return results;
+}
+
 async function loadCredentials() {
     try {
         // Create config directory if it doesn't exist
@@ -266,6 +363,14 @@ const BatchDeleteEmailsSchema = z.object({
     batchSize: z.number().optional().default(50).describe("Number of messages to process in each batch (default: 50)"),
 });
 
+const BatchReadEmailsSchema = z.object({
+    messageIds: z.array(z.string()).describe("List of message IDs to fetch"),
+    maxBodyLength: z.coerce.number().optional().default(5000)
+        .describe("Max characters of body text per email (default 5000). Set to 0 for no limit."),
+    output_path: z.string().optional()
+        .describe("File path to write JSON results. When provided, writes to file and returns only metadata."),
+});
+
 // Filter management schemas
 const CreateFilterSchema = z.object({
     criteria: z.object({
@@ -395,6 +500,18 @@ async function main() {
                 name: "batch_delete_emails",
                 description: "Permanently deletes multiple emails in batches",
                 inputSchema: zodToJsonSchema(BatchDeleteEmailsSchema),
+            },
+            {
+                name: "batch_read_emails",
+                description: `Fetch multiple email bodies in bulk using Gmail's batch API.
+
+Use this instead of calling read_email in a loop. Fetches up to 100 emails in 1-2 HTTP requests.
+
+Returns JSON array of {id, threadId, subject, from, date, body} objects.
+Use output_path to write results to a file (recommended for 20+ emails to avoid token overflow).
+
+Pairs with search_emails: first search to get IDs, then batch_read to get bodies.`,
+                inputSchema: zodToJsonSchema(BatchReadEmailsSchema),
             },
             {
                 name: "create_label",
@@ -653,38 +770,8 @@ Get the threadId from read_email output (shown as "Thread ID: ...").`,
                     const date = headers.find(h => h.name?.toLowerCase() === 'date')?.value || '';
                     const threadId = response.data.threadId || '';
 
-                    // Extract email content using the recursive function
-                    const { text, html } = extractEmailContent(response.data.payload as GmailMessagePart || {});
-
-                    // Use plain text content if available, otherwise convert HTML to text
-                    let body = text;
-                    if (!body && html) {
-                        try {
-                            body = htmlToText(html, {
-                                wordwrap: false,
-                                selectors: [
-                                    { selector: 'img', format: 'skip' },
-                                    { selector: 'a', options: { ignoreHref: true } }
-                                ]
-                            });
-                        } catch (conversionError) {
-                            // Fallback: strip HTML tags with regex if html-to-text fails
-                            body = html
-                                .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-                                .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-                                .replace(/<[^>]+>/g, ' ')
-                                .replace(/\s+/g, ' ')
-                                .trim();
-                            body = `[Note: HTML conversion failed, showing simplified text]\n\n${body}`;
-                        }
-                    }
-                    body = body || '';
-
-                    // Truncate very large bodies to prevent token overflow
-                    const MAX_BODY_LENGTH = 50000;
-                    if (body.length > MAX_BODY_LENGTH) {
-                        body = body.substring(0, MAX_BODY_LENGTH) + `\n\n[Truncated: ${body.length - MAX_BODY_LENGTH} characters omitted]`;
-                    }
+                    // Extract body text using shared helper
+                    const body = getBodyText(response.data.payload as GmailMessagePart || {});
 
                     // Get attachment information
                     const attachments: EmailAttachment[] = [];
@@ -722,6 +809,152 @@ Get the threadId from read_email output (shown as "Thread ID: ...").`,
                                 text: `Thread ID: ${threadId}\nSubject: ${subject}\nFrom: ${from}\nTo: ${to}\nDate: ${date}\n\n${body}${attachmentInfo}`,
                             },
                         ],
+                    };
+                }
+
+                case "batch_read_emails": {
+                    const validatedArgs = BatchReadEmailsSchema.parse(args);
+                    const messageIds = validatedArgs.messageIds;
+                    const maxBodyLength = validatedArgs.maxBodyLength ?? 5000;
+
+                    if (messageIds.length === 0) {
+                        return { content: [{ type: "text", text: "No message IDs provided." }] };
+                    }
+                    if (messageIds.length > 100) {
+                        return { content: [{ type: "text", text: "Maximum 100 message IDs per call." }] };
+                    }
+
+                    const allResults: Array<{
+                        id: string; threadId: string; subject: string;
+                        from: string; date: string; body: string; truncated: boolean;
+                    }> = [];
+                    const failures: Array<{ id: string; error: string }> = [];
+
+                    // Helper to execute a single batch HTTP request and parse results
+                    async function executeBatch(batchIds: string[]): Promise<{
+                        successes: typeof allResults;
+                        retryIds: string[];
+                        hardFailures: typeof failures;
+                    }> {
+                        const { body: requestBody, boundary: requestBoundary } = buildBatchRequest(batchIds);
+
+                        // Use oauth2Client.request() directly — the googleapis JS client
+                        // doesn't expose a batch endpoint, so raw HTTP is the only option.
+                        const response = await oauth2Client.request({
+                            url: 'https://www.googleapis.com/batch/gmail/v1',
+                            method: 'POST',
+                            headers: { 'Content-Type': `multipart/mixed; boundary=${requestBoundary}` },
+                            body: requestBody,
+                            responseType: 'text',
+                        });
+
+                        const responseContentType = response.headers['content-type'] as string || '';
+                        const boundaryMatch = responseContentType.match(/boundary=(.+)/);
+                        if (!boundaryMatch) {
+                            throw new Error('Could not extract boundary from batch response Content-Type header');
+                        }
+                        const responseBoundary = boundaryMatch[1].trim();
+
+                        const responseText = typeof response.data === 'string'
+                            ? response.data
+                            : String(response.data);
+
+                        const parsed = parseBatchResponse(responseText, responseBoundary);
+                        const successIds = new Set<string>();
+                        const successes: typeof allResults = [];
+                        const retryIds: string[] = [];
+                        const hardFailures: typeof failures = [];
+
+                        for (const item of parsed) {
+                            if (item.error) {
+                                if (item.error.includes('429')) {
+                                    retryIds.push(item.id);
+                                } else {
+                                    hardFailures.push({ id: item.id, error: item.error });
+                                }
+                                continue;
+                            }
+                            const msgData = item.data;
+                            successIds.add(msgData.id);
+                            const headers = msgData.payload?.headers || [];
+                            const subject = headers.find((h: any) => h.name?.toLowerCase() === 'subject')?.value || '';
+                            const from = headers.find((h: any) => h.name?.toLowerCase() === 'from')?.value || '';
+                            const date = headers.find((h: any) => h.name?.toLowerCase() === 'date')?.value || '';
+
+                            const rawBody = getBodyText(msgData.payload as GmailMessagePart || {}, maxBodyLength);
+                            const truncated = maxBodyLength > 0 && rawBody.includes('[Truncated:');
+
+                            successes.push({
+                                id: msgData.id,
+                                threadId: msgData.threadId || '',
+                                subject, from, date,
+                                body: rawBody,
+                                truncated,
+                            });
+                        }
+
+                        // Any IDs not in successes or hardFailures and not already in retryIds
+                        // were 429'd but had "unknown" IDs — diff against input to find them
+                        const unknownRetries = retryIds.filter(id => id === 'unknown').length;
+                        const knownIds = new Set([...successIds, ...hardFailures.map(f => f.id), ...retryIds.filter(id => id !== 'unknown')]);
+                        const missingIds = batchIds.filter(id => !knownIds.has(id));
+                        const finalRetryIds = [...retryIds.filter(id => id !== 'unknown'), ...missingIds];
+
+                        return { successes, retryIds: finalRetryIds, hardFailures };
+                    }
+
+                    // Process in batches of 25 to stay under Gmail's per-user concurrent request limit.
+                    const BATCH_SIZE = 25;
+                    let pendingIds = [...messageIds];
+                    const MAX_RETRIES = 2;
+
+                    for (let attempt = 0; attempt <= MAX_RETRIES && pendingIds.length > 0; attempt++) {
+                        if (attempt > 0) {
+                            // Wait before retrying (exponential backoff: 2s, 4s)
+                            await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
+                        }
+
+                        const retryNextRound: string[] = [];
+
+                        for (let i = 0; i < pendingIds.length; i += BATCH_SIZE) {
+                            const batchIds = pendingIds.slice(i, i + BATCH_SIZE);
+                            const { successes, retryIds, hardFailures } = await executeBatch(batchIds);
+
+                            allResults.push(...successes);
+                            failures.push(...hardFailures);
+                            retryNextRound.push(...retryIds);
+
+                            // Brief delay between batches to avoid hitting concurrency limits
+                            if (i + BATCH_SIZE < pendingIds.length) {
+                                await new Promise(resolve => setTimeout(resolve, 500));
+                            }
+                        }
+
+                        pendingIds = retryNextRound;
+                    }
+
+                    // Any remaining pendingIds after all retries are final failures
+                    for (const id of pendingIds) {
+                        failures.push({ id, error: 'Rate limited after retries' });
+                    }
+
+                    if (validatedArgs.output_path) {
+                        fs.writeFileSync(validatedArgs.output_path, JSON.stringify(allResults, null, 2));
+                        return {
+                            content: [{
+                                type: "text",
+                                text: `Batch read complete. ${allResults.length} emails written to ${validatedArgs.output_path}` +
+                                    (failures.length > 0 ? `\n${failures.length} failed: ${failures.map(f => `${f.id} (${f.error})`).join(', ')}` : ''),
+                            }],
+                        };
+                    }
+
+                    return {
+                        content: [{
+                            type: "text",
+                            text: JSON.stringify(allResults, null, 2) +
+                                (failures.length > 0 ? `\n\nFailed (${failures.length}): ${failures.map(f => `${f.id} (${f.error})`).join(', ')}` : ''),
+                        }],
                     };
                 }
 
