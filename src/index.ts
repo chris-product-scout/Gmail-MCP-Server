@@ -20,6 +20,7 @@ import {createEmailMessage, createEmailWithNodemailer} from "./utl.js";
 import { createLabel, updateLabel, deleteLabel, listLabels, findLabelByName, getOrCreateLabel, GmailLabel } from "./label-manager.js";
 import { createFilter, listFilters, getFilter, deleteFilter, filterTemplates, GmailFilterCriteria, GmailFilterAction } from "./filter-manager.js";
 import { convert as htmlToText } from 'html-to-text';
+import { loadMultiAccountTokens, createAccountClients, filterByAllowedAccounts, resolveAccountId, type AccountClients } from './token-manager.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -27,6 +28,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_DIR = path.join(os.homedir(), '.gmail-mcp');
 const OAUTH_PATH = process.env.GMAIL_OAUTH_PATH || path.join(CONFIG_DIR, 'gcp-oauth.keys.json');
 const CREDENTIALS_PATH = process.env.GMAIL_CREDENTIALS_PATH || path.join(CONFIG_DIR, 'credentials.json');
+const GMAIL_TOKEN_PATH = process.env.GMAIL_TOKEN_PATH || CREDENTIALS_PATH;
 
 // Type definitions for Gmail API responses
 interface GmailMessagePart {
@@ -59,6 +61,7 @@ interface EmailContent {
 
 // OAuth2 configuration
 let oauth2Client: OAuth2Client;
+let accountsMap: Map<string, AccountClients> = new Map();
 
 /**
  * Recursively extract email body content from MIME message parts
@@ -194,16 +197,14 @@ function parseBatchResponse(responseText: string, boundary: string): Array<{ id:
 async function loadCredentials() {
     try {
         // Create config directory if it doesn't exist
-        if (!process.env.GMAIL_OAUTH_PATH && !CREDENTIALS_PATH &&!fs.existsSync(CONFIG_DIR)) {
+        if (!process.env.GMAIL_OAUTH_PATH && !fs.existsSync(CONFIG_DIR)) {
             fs.mkdirSync(CONFIG_DIR, { recursive: true });
         }
 
         // Check for OAuth keys in current directory first, then in config directory
         const localOAuthPath = path.join(process.cwd(), 'gcp-oauth.keys.json');
-        let oauthPath = OAUTH_PATH;
 
         if (fs.existsSync(localOAuthPath)) {
-            // If found in current directory, copy to config directory
             fs.copyFileSync(localOAuthPath, OAUTH_PATH);
             console.log('OAuth keys found in current directory, copied to global config.');
         }
@@ -221,19 +222,26 @@ async function loadCredentials() {
             process.exit(1);
         }
 
-        const callback = process.argv[2] === 'auth' && process.argv[3] 
-        ? process.argv[3] 
-        : "http://localhost:3000/oauth2callback";
-
-        oauth2Client = new OAuth2Client(
-            keys.client_id,
-            keys.client_secret,
-            callback
-        );
-
-        if (fs.existsSync(CREDENTIALS_PATH)) {
-            const credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH, 'utf8'));
-            oauth2Client.setCredentials(credentials);
+        if (process.argv[2] === 'auth') {
+            // Auth mode: single client for interactive OAuth flow
+            const callback = process.argv[3] || "http://localhost:3000/oauth2callback";
+            oauth2Client = new OAuth2Client(keys.client_id, keys.client_secret, callback);
+            if (fs.existsSync(CREDENTIALS_PATH)) {
+                const credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH, 'utf8'));
+                oauth2Client.setCredentials(credentials);
+            }
+        } else {
+            // Server mode: load multi-account tokens
+            if (!fs.existsSync(GMAIL_TOKEN_PATH)) {
+                console.error(`Error: Token file not found: ${GMAIL_TOKEN_PATH}`);
+                process.exit(1);
+            }
+            const tokens = loadMultiAccountTokens(GMAIL_TOKEN_PATH);
+            accountsMap = filterByAllowedAccounts(
+                createAccountClients(tokens, { client_id: keys.client_id, client_secret: keys.client_secret }, GMAIL_TOKEN_PATH)
+            );
+            const accountNames = Array.from(accountsMap.keys()).join(', ');
+            process.stderr.write(`Loaded ${accountsMap.size} account(s): ${accountNames}\n`);
         }
     } catch (error) {
         console.error('Error loading credentials:', error);
@@ -431,6 +439,17 @@ const ArchiveThreadSchema = z.object({
     threadId: z.string().describe("ID of the thread to archive (get this from read_email output)"),
 });
 
+// Extend a Zod schema's JSON representation with an optional account parameter
+function schemaWithAccount(schema: z.ZodTypeAny): Record<string, unknown> {
+    const jsonSchema = zodToJsonSchema(schema) as Record<string, any>;
+    if (!jsonSchema.properties) jsonSchema.properties = {};
+    jsonSchema.properties.account = {
+        type: 'string',
+        description: "Account to use (e.g., 'work'). Optional if only one account.",
+    };
+    return jsonSchema;
+}
+
 // Main function
 async function main() {
     await loadCredentials();
@@ -440,9 +459,6 @@ async function main() {
         console.log('Authentication completed successfully');
         process.exit(0);
     }
-
-    // Initialize Gmail API
-    const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 
     // Server implementation
     const server = new Server({
@@ -459,47 +475,47 @@ async function main() {
             {
                 name: "send_email",
                 description: "Sends a new email",
-                inputSchema: zodToJsonSchema(SendEmailSchema),
+                inputSchema: schemaWithAccount(SendEmailSchema),
             },
             {
                 name: "draft_email",
                 description: "Draft a new email",
-                inputSchema: zodToJsonSchema(SendEmailSchema),
+                inputSchema: schemaWithAccount(SendEmailSchema),
             },
             {
                 name: "read_email",
                 description: "Retrieves the content of a specific email",
-                inputSchema: zodToJsonSchema(ReadEmailSchema),
+                inputSchema: schemaWithAccount(ReadEmailSchema),
             },
             {
                 name: "search_emails",
                 description: "Searches for emails using Gmail search syntax",
-                inputSchema: zodToJsonSchema(SearchEmailsSchema),
+                inputSchema: schemaWithAccount(SearchEmailsSchema),
             },
             {
                 name: "modify_email",
                 description: "Modifies email labels (move to different folders)",
-                inputSchema: zodToJsonSchema(ModifyEmailSchema),
+                inputSchema: schemaWithAccount(ModifyEmailSchema),
             },
             {
                 name: "delete_email",
                 description: "Permanently deletes an email",
-                inputSchema: zodToJsonSchema(DeleteEmailSchema),
+                inputSchema: schemaWithAccount(DeleteEmailSchema),
             },
             {
                 name: "list_email_labels",
                 description: "Retrieves all available Gmail labels",
-                inputSchema: zodToJsonSchema(ListEmailLabelsSchema),
+                inputSchema: schemaWithAccount(ListEmailLabelsSchema),
             },
             {
                 name: "batch_modify_emails",
                 description: "Modifies labels for multiple emails in batches",
-                inputSchema: zodToJsonSchema(BatchModifyEmailsSchema),
+                inputSchema: schemaWithAccount(BatchModifyEmailsSchema),
             },
             {
                 name: "batch_delete_emails",
                 description: "Permanently deletes multiple emails in batches",
-                inputSchema: zodToJsonSchema(BatchDeleteEmailsSchema),
+                inputSchema: schemaWithAccount(BatchDeleteEmailsSchema),
             },
             {
                 name: "batch_read_emails",
@@ -511,57 +527,57 @@ Returns JSON array of {id, threadId, subject, from, date, body} objects.
 Use output_path to write results to a file (recommended for 20+ emails to avoid token overflow).
 
 Pairs with search_emails: first search to get IDs, then batch_read to get bodies.`,
-                inputSchema: zodToJsonSchema(BatchReadEmailsSchema),
+                inputSchema: schemaWithAccount(BatchReadEmailsSchema),
             },
             {
                 name: "create_label",
                 description: "Creates a new Gmail label",
-                inputSchema: zodToJsonSchema(CreateLabelSchema),
+                inputSchema: schemaWithAccount(CreateLabelSchema),
             },
             {
                 name: "update_label",
                 description: "Updates an existing Gmail label",
-                inputSchema: zodToJsonSchema(UpdateLabelSchema),
+                inputSchema: schemaWithAccount(UpdateLabelSchema),
             },
             {
                 name: "delete_label",
                 description: "Deletes a Gmail label",
-                inputSchema: zodToJsonSchema(DeleteLabelSchema),
+                inputSchema: schemaWithAccount(DeleteLabelSchema),
             },
             {
                 name: "get_or_create_label",
                 description: "Gets an existing label by name or creates it if it doesn't exist",
-                inputSchema: zodToJsonSchema(GetOrCreateLabelSchema),
+                inputSchema: schemaWithAccount(GetOrCreateLabelSchema),
             },
             {
                 name: "create_filter",
                 description: "Creates a new Gmail filter with custom criteria and actions",
-                inputSchema: zodToJsonSchema(CreateFilterSchema),
+                inputSchema: schemaWithAccount(CreateFilterSchema),
             },
             {
                 name: "list_filters",
                 description: "Retrieves all Gmail filters",
-                inputSchema: zodToJsonSchema(ListFiltersSchema),
+                inputSchema: schemaWithAccount(ListFiltersSchema),
             },
             {
                 name: "get_filter",
                 description: "Gets details of a specific Gmail filter",
-                inputSchema: zodToJsonSchema(GetFilterSchema),
+                inputSchema: schemaWithAccount(GetFilterSchema),
             },
             {
                 name: "delete_filter",
                 description: "Deletes a Gmail filter",
-                inputSchema: zodToJsonSchema(DeleteFilterSchema),
+                inputSchema: schemaWithAccount(DeleteFilterSchema),
             },
             {
                 name: "create_filter_from_template",
                 description: "Creates a filter using a pre-defined template for common scenarios",
-                inputSchema: zodToJsonSchema(CreateFilterFromTemplateSchema),
+                inputSchema: schemaWithAccount(CreateFilterFromTemplateSchema),
             },
             {
                 name: "download_attachment",
                 description: "Downloads an email attachment to a specified location",
-                inputSchema: zodToJsonSchema(DownloadAttachmentSchema),
+                inputSchema: schemaWithAccount(DownloadAttachmentSchema),
             },
             {
                 name: "get_thread_messages",
@@ -572,7 +588,7 @@ Use this tool when you need to find all related messages in a conversation threa
 Common use case: After reading an email with read_email (which returns Thread ID), use this tool to get all messages in that thread, then use batch_modify_emails to archive them all.
 
 Returns: Message ID, subject, sender, and date for each message in the thread.`,
-                inputSchema: zodToJsonSchema(GetThreadMessagesSchema),
+                inputSchema: schemaWithAccount(GetThreadMessagesSchema),
             },
             {
                 name: "archive_thread",
@@ -586,13 +602,20 @@ How it works:
 - Returns success status with count of archived messages
 
 Get the threadId from read_email output (shown as "Thread ID: ...").`,
-                inputSchema: zodToJsonSchema(ArchiveThreadSchema),
+                inputSchema: schemaWithAccount(ArchiveThreadSchema),
             },
         ],
     }))
 
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { name, arguments: args } = request.params;
+
+        // Resolve account and get clients for this request
+        const requestedAccount = (args as any)?.account;
+        const accountId = resolveAccountId(accountsMap, requestedAccount);
+        const clients = accountsMap.get(accountId)!;
+        const gmail = clients.gmail;
+        const oauth2Client = clients.oauth2Client;
 
         async function handleEmailAction(action: "send" | "draft", validatedArgs: any) {
             let message: string;
