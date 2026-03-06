@@ -848,7 +848,7 @@ Get the threadId from read_email output (shown as "Thread ID: ...").`,
                             responseType: 'text',
                         });
 
-                        const responseContentType = response.headers['content-type'] as string || '';
+                        const responseContentType = (response.headers instanceof Headers ? response.headers.get('content-type') : response.headers['content-type']) as string || '';
                         const boundaryMatch = responseContentType.match(/boundary=(.+)/);
                         if (!boundaryMatch) {
                             throw new Error('Could not extract boundary from batch response Content-Type header');
