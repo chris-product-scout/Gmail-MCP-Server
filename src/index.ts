@@ -439,6 +439,34 @@ const ArchiveThreadSchema = z.object({
     threadId: z.string().describe("ID of the thread to archive (get this from read_email output)"),
 });
 
+const GetDraftsSchema = z.object({
+    draftId: z.string().optional().describe("ID of a specific draft to retrieve with full content. Omit to list all drafts with metadata (subject, to, date)."),
+    maxResults: z.number().optional().describe("Max drafts to return when listing (default 100). Ignored when draftId is provided."),
+    pageToken: z.string().optional().describe("Pagination token from a previous list response. Ignored when draftId is provided."),
+    q: z.string().optional().describe("Gmail search query to filter drafts when listing (e.g. 'to:john@example.com'). Ignored when draftId is provided."),
+}).describe("Get drafts. With draftId: returns full content of that draft. Without draftId: lists all drafts with subject, recipients, and date metadata.");
+
+const UpdateDraftSchema = z.object({
+    draftId: z.string().describe("ID of the draft to update (get this from get_drafts)"),
+    to: z.array(z.string()).describe("List of recipient email addresses"),
+    subject: z.string().describe("Email subject"),
+    body: z.string().describe("Email body content (plain text)"),
+    htmlBody: z.string().optional().describe("HTML version of the email body"),
+    mimeType: z.enum(['text/plain', 'text/html', 'multipart/alternative']).optional().default('text/plain').describe("Email content type"),
+    cc: z.array(z.string()).optional().describe("List of CC recipients"),
+    bcc: z.array(z.string()).optional().describe("List of BCC recipients"),
+    threadId: z.string().optional().describe("Thread ID to preserve threading (use the threadId from get_drafts)"),
+    inReplyTo: z.string().optional().describe("Message ID being replied to"),
+}).describe("Replace an existing draft's content. All message fields are required since this fully overwrites the draft.");
+
+const DeleteDraftSchema = z.object({
+    draftId: z.string().describe("ID of the draft to permanently delete (get this from get_drafts)"),
+}).describe("Permanently and immediately deletes a draft. Cannot be undone.");
+
+const SendDraftSchema = z.object({
+    draftId: z.string().describe("ID of the draft to send (get this from get_drafts)"),
+}).describe("Sends an existing draft to the recipients in its To, Cc, and Bcc headers.");
+
 // Extend a Zod schema's JSON representation with an optional account parameter
 function schemaWithAccount(schema: z.ZodTypeAny): Record<string, unknown> {
     const jsonSchema = zodToJsonSchema(schema) as Record<string, any>;
@@ -481,6 +509,26 @@ async function main() {
                 name: "draft_email",
                 description: "Draft a new email",
                 inputSchema: schemaWithAccount(SendEmailSchema),
+            },
+            {
+                name: "get_drafts",
+                description: "Get drafts. With draftId: returns full content. Without draftId: lists all drafts with subject, recipients, and date.",
+                inputSchema: schemaWithAccount(GetDraftsSchema),
+            },
+            {
+                name: "update_draft",
+                description: "Replace an existing draft's content. Fully overwrites the draft — include all message fields.",
+                inputSchema: schemaWithAccount(UpdateDraftSchema),
+            },
+            {
+                name: "delete_draft",
+                description: "Permanently delete a draft. Cannot be undone.",
+                inputSchema: schemaWithAccount(DeleteDraftSchema),
+            },
+            {
+                name: "send_draft",
+                description: "Send an existing draft to its recipients.",
+                inputSchema: schemaWithAccount(SendDraftSchema),
             },
             {
                 name: "read_email",
@@ -1623,6 +1671,114 @@ Get the threadId from read_email output (shown as "Thread ID: ...").`,
                         }
                         throw error;
                     }
+                }
+
+                case "get_drafts": {
+                    const validatedArgs = GetDraftsSchema.parse(args);
+
+                    if (validatedArgs.draftId) {
+                        // Single draft — return full content
+                        const response = await gmail.users.drafts.get({
+                            userId: 'me',
+                            id: validatedArgs.draftId,
+                            format: 'full',
+                        });
+                        const message = response.data.message;
+                        const headers = message?.payload?.headers || [];
+                        const subject = headers.find(h => h.name?.toLowerCase() === 'subject')?.value || '(no subject)';
+                        const from = headers.find(h => h.name?.toLowerCase() === 'from')?.value || '';
+                        const to = headers.find(h => h.name?.toLowerCase() === 'to')?.value || '';
+                        const cc = headers.find(h => h.name?.toLowerCase() === 'cc')?.value || '';
+                        const date = headers.find(h => h.name?.toLowerCase() === 'date')?.value || '';
+                        const body = getBodyText(message?.payload as GmailMessagePart || {});
+                        return {
+                            content: [{
+                                type: "text",
+                                text: `Draft ID: ${response.data.id}\nMessage ID: ${message?.id || ''}\nThread ID: ${message?.threadId || ''}\nSubject: ${subject}\nFrom: ${from}\nTo: ${to}${cc ? `\nCc: ${cc}` : ''}\nDate: ${date}\n\n${body}`,
+                            }],
+                        };
+                    } else {
+                        // List mode — fetch metadata for each draft in parallel
+                        const listResponse = await gmail.users.drafts.list({
+                            userId: 'me',
+                            ...(validatedArgs.maxResults && { maxResults: validatedArgs.maxResults }),
+                            ...(validatedArgs.pageToken && { pageToken: validatedArgs.pageToken }),
+                            ...(validatedArgs.q && { q: validatedArgs.q }),
+                        });
+                        const drafts = listResponse.data.drafts || [];
+                        if (drafts.length === 0) {
+                            return { content: [{ type: "text", text: "No drafts found." }] };
+                        }
+                        const draftDetails = await Promise.all(
+                            drafts.map(async (d) => {
+                                try {
+                                    const detail = await gmail.users.drafts.get({
+                                        userId: 'me',
+                                        id: d.id!,
+                                        format: 'metadata',
+                                    });
+                                    const headers = detail.data.message?.payload?.headers || [];
+                                    const subject = headers.find(h => h.name?.toLowerCase() === 'subject')?.value || '(no subject)';
+                                    const to = headers.find(h => h.name?.toLowerCase() === 'to')?.value || '';
+                                    const date = headers.find(h => h.name?.toLowerCase() === 'date')?.value || '';
+                                    return `Draft ID: ${d.id}\nTo: ${to}\nSubject: ${subject}\nDate: ${date}`;
+                                } catch {
+                                    return `Draft ID: ${d.id} (could not fetch metadata)`;
+                                }
+                            })
+                        );
+                        let text = `Found ${drafts.length} draft(s):\n\n` + draftDetails.join('\n\n');
+                        if (listResponse.data.nextPageToken) {
+                            text += `\n\nNext page token: ${listResponse.data.nextPageToken}`;
+                        }
+                        return { content: [{ type: "text", text }] };
+                    }
+                }
+
+                case "update_draft": {
+                    const validatedArgs = UpdateDraftSchema.parse(args);
+                    const message = createEmailMessage(validatedArgs);
+                    const encodedMessage = Buffer.from(message).toString('base64')
+                        .replace(/\+/g, '-')
+                        .replace(/\//g, '_')
+                        .replace(/=+$/, '');
+                    const messageRequest: any = { raw: encodedMessage };
+                    if (validatedArgs.threadId) {
+                        messageRequest.threadId = validatedArgs.threadId;
+                    }
+                    const response = await gmail.users.drafts.update({
+                        userId: 'me',
+                        id: validatedArgs.draftId,
+                        requestBody: {
+                            id: validatedArgs.draftId,
+                            message: messageRequest,
+                        },
+                    });
+                    return {
+                        content: [{ type: "text", text: `Draft ${response.data.id} updated successfully.` }],
+                    };
+                }
+
+                case "delete_draft": {
+                    const validatedArgs = DeleteDraftSchema.parse(args);
+                    await gmail.users.drafts.delete({
+                        userId: 'me',
+                        id: validatedArgs.draftId,
+                    });
+                    return {
+                        content: [{ type: "text", text: `Draft ${validatedArgs.draftId} deleted successfully.` }],
+                    };
+                }
+
+                case "send_draft": {
+                    const validatedArgs = SendDraftSchema.parse(args);
+                    const response = await gmail.users.drafts.send({
+                        userId: 'me',
+                        requestBody: { id: validatedArgs.draftId },
+                    });
+                    return {
+                        content: [{ type: "text", text: `Draft sent successfully. Message ID: ${response.data.id}` }],
+                    };
                 }
 
                 default:

@@ -16,16 +16,11 @@ function encodeEmailHeader(text: string): string {
     return text;
 }
 
-export const validateEmail = (email: string): boolean => {
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    return emailRegex.test(email);
-};
-
 export function createEmailMessage(validatedArgs: any): string {
     const encodedSubject = encodeEmailHeader(validatedArgs.subject);
     // Determine content type based on available content and explicit mimeType
     let mimeType = validatedArgs.mimeType || 'text/plain';
-    
+
     // If htmlBody is provided and mimeType isn't explicitly set to text/plain,
     // use multipart/alternative to include both versions
     if (validatedArgs.htmlBody && mimeType !== 'text/plain') {
@@ -34,13 +29,6 @@ export function createEmailMessage(validatedArgs: any): string {
 
     // Generate a random boundary string for multipart messages
     const boundary = `----=_NextPart_${Math.random().toString(36).substring(2)}`;
-
-    // Validate email addresses
-    (validatedArgs.to as string[]).forEach(email => {
-        if (!validateEmail(email)) {
-            throw new Error(`Recipient email address is invalid: ${email}`);
-        }
-    });
 
     // Common email headers
     const emailParts = [
@@ -98,13 +86,6 @@ export function createEmailMessage(validatedArgs: any): string {
 
 
 export async function createEmailWithNodemailer(validatedArgs: any): Promise<string> {
-    // Validate email addresses
-    (validatedArgs.to as string[]).forEach(email => {
-        if (!validateEmail(email)) {
-            throw new Error(`Recipient email address is invalid: ${email}`);
-        }
-    });
-
     // Create a nodemailer transporter (we won't actually send, just generate the message)
     const transporter = nodemailer.createTransport({
         streamTransport: true,
