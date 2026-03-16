@@ -44,25 +44,25 @@
     "access": "public"
   },
   "engines": {
-    "node": ">=14.0.0"
+    "node": ">=20.0.0"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^0.4.0",
-    "@types/mime-types": "^2.1.4",
+    "@ai-sdk/openai": "^3.0.41",
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@types/mime-types": "^3.0.1",
     "google-auth-library": "^10.6.1",
     "googleapis": "^171.4.0",
     "html-to-text": "^9.0.5",
     "mcp-evals": "^1.0.18",
-    "mime-types": "^3.0.1",
-    "nodemailer": "^7.0.3",
-    "open": "^10.0.0",
-    "zod": "^3.22.4",
-    "zod-to-json-schema": "^3.22.1"
+    "mime-types": "^3.0.2",
+    "nodemailer": "^8.0.2",
+    "open": "^11.0.0",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/html-to-text": "^9.0.4",
-    "@types/node": "^20.10.5",
-    "@types/nodemailer": "^6.4.17",
-    "typescript": "^5.3.3"
+    "@types/node": "^22.19.15",
+    "@types/nodemailer": "^7.0.11",
+    "typescript": "^5.9.3"
   }
 }
