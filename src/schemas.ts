@@ -70,12 +70,12 @@ export const BatchModifyEmailsSchema = z.object({
     messageIds: z.array(z.string()).describe("List of message IDs to modify"),
     addLabelIds: z.array(z.string()).optional().describe("List of label IDs to add to all messages"),
     removeLabelIds: z.array(z.string()).optional().describe("List of label IDs to remove from all messages"),
-    batchSize: z.number().optional().default(50).describe("Number of messages to process in each batch (default: 50)"),
+    batchSize: z.number().optional().default(1000).describe("Number of messages to process in each batch (default: 1000, Gmail API max)"),
 });
 
 export const BatchDeleteEmailsSchema = z.object({
     messageIds: z.array(z.string()).describe("List of message IDs to delete"),
-    batchSize: z.number().optional().default(50).describe("Number of messages to process in each batch (default: 50)"),
+    batchSize: z.number().optional().default(1000).describe("Number of messages to process in each batch (default: 1000, Gmail API max)"),
 });
 
 export const BatchReadEmailsSchema = z.object({

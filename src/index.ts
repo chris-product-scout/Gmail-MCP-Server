@@ -350,35 +350,6 @@ async function handleEmailAction(action: "send" | "draft", validatedArgs: any, g
     }
 }
 
-// Helper function to process operations in batches
-async function processBatches<T, U>(
-    items: T[],
-    batchSize: number,
-    processFn: (batch: T[]) => Promise<U[]>
-): Promise<{ successes: U[], failures: { item: T, error: Error }[] }> {
-    const successes: U[] = [];
-    const failures: { item: T, error: Error }[] = [];
-
-    for (let i = 0; i < items.length; i += batchSize) {
-        const batch = items.slice(i, i + batchSize);
-        try {
-            const results = await processFn(batch);
-            successes.push(...results);
-        } catch (error) {
-            for (const item of batch) {
-                try {
-                    const result = await processFn([item]);
-                    successes.push(...result);
-                } catch (itemError) {
-                    failures.push({ item, error: itemError as Error });
-                }
-            }
-        }
-    }
-
-    return { successes, failures };
-}
-
 // Main function
 async function main() {
     await loadCredentials();
@@ -719,52 +690,71 @@ Pairs with search_emails: first search to get IDs, then batch_read to get bodies
     });
 
     server.registerTool("batch_modify_emails", {
-        description: "Modifies labels for multiple emails in batches",
+        description: "Modifies labels for multiple emails using Gmail's native batch API",
         inputSchema: withAccount(BatchModifyEmailsSchema.shape),
         annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     }, async (args) => {
         const { gmail } = getClients(args.account);
-        const batchSize = args.batchSize || 50;
-        const requestBody: any = {};
-        if (args.addLabelIds) requestBody.addLabelIds = args.addLabelIds;
-        if (args.removeLabelIds) requestBody.removeLabelIds = args.removeLabelIds;
+        if (args.messageIds.length === 0) {
+            return { content: [{ type: "text" as const, text: "0 messages processed." }] };
+        }
+        const batchSize = args.batchSize || 1000;
+        const batchRequestBody: any = {};
+        if (args.addLabelIds) batchRequestBody.addLabelIds = args.addLabelIds;
+        if (args.removeLabelIds) batchRequestBody.removeLabelIds = args.removeLabelIds;
 
-        const { successes, failures } = await processBatches(args.messageIds, batchSize, async (batch) => {
-            return Promise.all(batch.map(async (messageId) => {
-                await gmail.users.messages.modify({ userId: 'me', id: messageId, requestBody });
-                return { messageId, success: true };
-            }));
-        });
+        let successes = 0;
+        const failures: { id: string, error: string }[] = [];
 
-        let resultText = `Batch label modification complete.\nSuccessfully processed: ${successes.length} messages\n`;
+        for (let i = 0; i < args.messageIds.length; i += batchSize) {
+            const chunk = args.messageIds.slice(i, i + batchSize);
+            try {
+                await gmail.users.messages.batchModify({
+                    userId: 'me',
+                    requestBody: { ids: chunk, ...batchRequestBody }
+                });
+                successes += chunk.length;
+            } catch {
+                // Batch failed — fall back to individual calls for this chunk
+                for (const id of chunk) {
+                    try {
+                        await gmail.users.messages.modify({ userId: 'me', id, requestBody: batchRequestBody });
+                        successes++;
+                    } catch (e: any) {
+                        failures.push({ id, error: e.message });
+                    }
+                }
+            }
+        }
+
+        let resultText = `Batch label modification complete.\nSuccessfully processed: ${successes} messages\n`;
         if (failures.length > 0) {
             resultText += `Failed to process: ${failures.length} messages\n\nFailed message IDs:\n`;
-            resultText += failures.map(f => `- ${(f.item as string).substring(0, 16)}... (${f.error.message})`).join('\n');
+            resultText += failures.map(f => `- ${f.id.substring(0, 16)}... (${f.error})`).join('\n');
         }
         return { content: [{ type: "text" as const, text: resultText }] };
     });
 
     server.registerTool("batch_delete_emails", {
-        description: "Permanently deletes multiple emails in batches",
+        description: "Permanently deletes multiple emails using Gmail's native batch API. Note: cannot confirm individual message outcomes — silently ignores invalid or already-deleted IDs.",
         inputSchema: withAccount(BatchDeleteEmailsSchema.shape),
         annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     }, async (args) => {
         const { gmail } = getClients(args.account);
-        const batchSize = args.batchSize || 50;
-
-        const { successes, failures } = await processBatches(args.messageIds, batchSize, async (batch) => {
-            return Promise.all(batch.map(async (messageId) => {
-                await gmail.users.messages.delete({ userId: 'me', id: messageId });
-                return { messageId, success: true };
-            }));
-        });
-
-        let resultText = `Batch delete operation complete.\nSuccessfully deleted: ${successes.length} messages\n`;
-        if (failures.length > 0) {
-            resultText += `Failed to delete: ${failures.length} messages\n\nFailed message IDs:\n`;
-            resultText += failures.map(f => `- ${(f.item as string).substring(0, 16)}... (${f.error.message})`).join('\n');
+        if (args.messageIds.length === 0) {
+            return { content: [{ type: "text" as const, text: "0 messages requested for deletion." }] };
         }
-        return { content: [{ type: "text" as const, text: resultText }] };
+        const batchSize = args.batchSize || 1000;
+
+        for (let i = 0; i < args.messageIds.length; i += batchSize) {
+            const chunk = args.messageIds.slice(i, i + batchSize);
+            await gmail.users.messages.batchDelete({
+                userId: 'me',
+                requestBody: { ids: chunk }
+            });
+        }
+
+        return { content: [{ type: "text" as const, text: `Batch delete complete.\nRequested deletion: ${args.messageIds.length} messages` }] };
     });
 
     // ── Modify & Delete Tools ───────────────────────────────────────
@@ -794,14 +784,9 @@ Pairs with search_emails: first search to get IDs, then batch_read to get bodies
     });
 
     server.registerTool("archive_thread", {
-        description: `Archives an entire email thread by removing the INBOX label from all messages.
+        description: `Archives an entire email thread by removing the INBOX label from all messages in a single atomic operation.
 
-Use this tool when you want to archive an email conversation. This is the PREFERRED way to archive emails because it handles all messages in the thread atomically.
-
-How it works:
-- Gets all messages in the thread
-- Removes the INBOX label from each message
-- Returns success status with count of archived messages
+Use this tool when you want to archive an email conversation. This is the PREFERRED way to archive emails.
 
 Get the threadId from read_email output (shown as "Thread ID: ...").`,
         inputSchema: withAccount(ArchiveThreadSchema.shape),
@@ -810,31 +795,13 @@ Get the threadId from read_email output (shown as "Thread ID: ...").`,
         const { gmail } = getClients(args.account);
 
         try {
-            const threadResponse = await gmail.users.threads.get({ userId: 'me', id: args.threadId, format: 'minimal' });
-            const messages = threadResponse.data.messages || [];
-            if (messages.length === 0) {
-                return { content: [{ type: "text" as const, text: `Thread ${args.threadId} exists but contains no messages.` }] };
-            }
-
-            const messageIds = messages.map((msg: any) => msg.id!).filter(Boolean);
-            const results = await Promise.all(
-                messageIds.map(async (messageId: string) => {
-                    try {
-                        await gmail.users.messages.modify({ userId: 'me', id: messageId, requestBody: { removeLabelIds: ['INBOX'] } });
-                        return { messageId, success: true };
-                    } catch (error: any) {
-                        return { messageId, success: false, error: error.message };
-                    }
-                })
-            );
-
-            const succeeded = results.filter(r => r.success);
-            const failed = results.filter(r => !r.success);
-            let resultText = `Thread archived successfully.\nMessages archived: ${succeeded.length}\nMessage IDs: ${succeeded.map(r => r.messageId).join(', ')}`;
-            if (failed.length > 0) {
-                resultText += `\n\nFailed to archive ${failed.length} message(s):\n` + failed.map(r => `- ${r.messageId}: ${(r as any).error}`).join('\n');
-            }
-            return { content: [{ type: "text" as const, text: resultText }] };
+            const response = await gmail.users.threads.modify({
+                userId: 'me',
+                id: args.threadId,
+                requestBody: { removeLabelIds: ['INBOX'] }
+            });
+            const messageCount = response.data.messages?.length || 0;
+            return { content: [{ type: "text" as const, text: `Thread ${args.threadId} archived successfully.\nMessages archived: ${messageCount}` }] };
         } catch (error: any) {
             if (error.code === 404) {
                 return { content: [{ type: "text" as const, text: `Thread ${args.threadId} not found. Verify the thread ID is correct (get it from read_email output).` }], isError: true };
