@@ -308,11 +308,74 @@ function getClients(account?: string) {
     return { gmail: clients.gmail, oauth2Client: clients.oauth2Client };
 }
 
+// Resolve Gmail message ID to RFC 2822 Message-ID header and reply-all recipients
+async function resolveReplyMetadata(gmail: any, gmailMessageId: string): Promise<{
+    rfc2822MessageId: string;
+    subject?: string;
+    replyAllTo: string[];
+    replyAllCc: string[];
+}> {
+    const response = await gmail.users.messages.get({
+        userId: 'me',
+        id: gmailMessageId,
+        format: 'metadata',
+        metadataHeaders: ['Message-ID', 'Subject', 'From', 'To', 'Cc', 'Reply-To'],
+    });
+    const headers = response.data.payload?.headers || [];
+    const getHeader = (name: string) => headers.find((h: any) => h.name === name)?.value || '';
+
+    const messageIdHeader = getHeader('Message-ID');
+    const subject = getHeader('Subject');
+    const replyTo = getHeader('Reply-To');
+    const from = getHeader('From');
+    const to = getHeader('To');
+    const cc = getHeader('Cc');
+
+    // Get the authenticated user's email to exclude from recipients
+    const profile = await gmail.users.getProfile({ userId: 'me' });
+    const myEmail = (profile.data.emailAddress || '').toLowerCase();
+
+    // Parse comma-separated email lists, filtering out our own address
+    const parseAddresses = (header: string): string[] =>
+        header.split(',').map(s => s.trim()).filter(s => s && !s.toLowerCase().includes(myEmail));
+
+    // Reply-All: To = Reply-To or From; CC = original To + CC minus ourselves
+    const replyAllTo = replyTo ? [replyTo] : from ? [from] : [];
+    const replyAllCc = [...parseAddresses(to), ...parseAddresses(cc)];
+
+    return {
+        rfc2822MessageId: messageIdHeader || gmailMessageId,
+        subject,
+        replyAllTo,
+        replyAllCc,
+    };
+}
+
 // Shared email action handler for send_email and draft_email
 async function handleEmailAction(action: "send" | "draft", validatedArgs: any, gmail: any) {
     let message: string;
 
     try {
+        // Resolve inReplyTo: fetch RFC 2822 Message-ID and auto-populate reply-all recipients
+        if (validatedArgs.inReplyTo) {
+            const resolved = await resolveReplyMetadata(gmail, validatedArgs.inReplyTo);
+            validatedArgs.inReplyTo = resolved.rfc2822MessageId;
+            // Add Re: prefix to subject if this is a reply and subject doesn't already have it
+            if (validatedArgs.subject && !validatedArgs.subject.match(/^Re:/i) && resolved.subject) {
+                validatedArgs.subject = `Re: ${resolved.subject}`;
+            }
+            // Auto-populate reply recipients if caller didn't explicitly set them
+            if (!validatedArgs.to || validatedArgs.to.length === 0) {
+                validatedArgs.to = resolved.replyAllTo;
+            }
+            // Auto-populate CC with reply-all recipients unless replyAll is explicitly false
+            if (validatedArgs.replyAll !== false && (!validatedArgs.cc || validatedArgs.cc.length === 0)) {
+                if (resolved.replyAllCc.length > 0) {
+                    validatedArgs.cc = resolved.replyAllCc;
+                }
+            }
+        }
+
         if (validatedArgs.attachments && validatedArgs.attachments.length > 0) {
             message = await createEmailWithNodemailer(validatedArgs);
         } else {
@@ -441,6 +504,22 @@ async function main() {
         annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     }, async (args) => {
         const { gmail } = getClients(args.account);
+        // Resolve inReplyTo: fetch RFC 2822 Message-ID and auto-populate reply-all recipients
+        if (args.inReplyTo) {
+            const resolved = await resolveReplyMetadata(gmail, args.inReplyTo);
+            args.inReplyTo = resolved.rfc2822MessageId;
+            if (args.subject && !args.subject.match(/^Re:/i) && resolved.subject) {
+                args.subject = `Re: ${resolved.subject}`;
+            }
+            if (!args.to || args.to.length === 0) {
+                args.to = resolved.replyAllTo;
+            }
+            if (args.replyAll !== false && (!args.cc || args.cc.length === 0)) {
+                if (resolved.replyAllCc.length > 0) {
+                    args.cc = resolved.replyAllCc;
+                }
+            }
+        }
         const message = createEmailMessage(args);
         const encodedMessage = Buffer.from(message).toString('base64')
             .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -487,6 +566,8 @@ async function main() {
         const subject = headers.find((h: any) => h.name?.toLowerCase() === 'subject')?.value || '';
         const from = headers.find((h: any) => h.name?.toLowerCase() === 'from')?.value || '';
         const to = headers.find((h: any) => h.name?.toLowerCase() === 'to')?.value || '';
+        const cc = headers.find((h: any) => h.name?.toLowerCase() === 'cc')?.value || '';
+        const replyTo = headers.find((h: any) => h.name?.toLowerCase() === 'reply-to')?.value || '';
         const date = headers.find((h: any) => h.name?.toLowerCase() === 'date')?.value || '';
         const threadId = response.data.threadId || '';
         const body = getBodyText(response.data.payload as GmailMessagePart || {});
@@ -512,7 +593,7 @@ async function main() {
             attachments.map(a => `- ${a.filename} (${a.mimeType}, ${Math.round(a.size/1024)} KB, ID: ${a.id})`).join('\n') : '';
 
         return {
-            content: [{ type: "text" as const, text: `Thread ID: ${threadId}\nSubject: ${subject}\nFrom: ${from}\nTo: ${to}\nDate: ${date}\n\n${body}${attachmentInfo}` }],
+            content: [{ type: "text" as const, text: `Thread ID: ${threadId}\nSubject: ${subject}\nFrom: ${from}\nTo: ${to}${cc ? `\nCc: ${cc}` : ''}${replyTo ? `\nReply-To: ${replyTo}` : ''}\nDate: ${date}\n\n${body}${attachmentInfo}` }],
         };
     });
 
