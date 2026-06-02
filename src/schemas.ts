@@ -16,7 +16,7 @@ export const SendEmailSchema = z.object({
     mimeType: z.enum(['text/plain', 'text/html', 'multipart/alternative']).optional().default('text/plain').describe("Email content type"),
     cc: z.array(z.string()).optional().describe("List of CC recipients"),
     bcc: z.array(z.string()).optional().describe("List of BCC recipients"),
-    threadId: z.string().optional().describe("Thread ID to reply to"),
+    threadId: z.string().optional().describe("Thread ID to file the message into. Optional: when inReplyTo is set this is auto-derived from the replied-to message, so you normally don't need to pass it for replies."),
     inReplyTo: z.string().optional().describe("Gmail message ID being replied to (the server resolves the RFC 2822 Message-ID header automatically). When set, auto-populates To/CC with reply-all recipients unless replyAll is false."),
     replyAll: z.boolean().optional().default(true).describe("When replying (inReplyTo set), auto-populate To/CC with all original recipients. Set to false to only reply to sender. Default: true."),
     attachments: z.array(z.string()).optional().describe("List of file paths to attach to the email"),
@@ -162,7 +162,7 @@ export const UpdateDraftSchema = z.object({
     mimeType: z.enum(['text/plain', 'text/html', 'multipart/alternative']).optional().default('text/plain').describe("Email content type"),
     cc: z.array(z.string()).optional().describe("List of CC recipients"),
     bcc: z.array(z.string()).optional().describe("List of BCC recipients"),
-    threadId: z.string().optional().describe("Thread ID to preserve threading (use the threadId from get_drafts)"),
+    threadId: z.string().optional().describe("Thread ID to preserve threading. Optional: auto-derived from inReplyTo when that's set."),
     inReplyTo: z.string().optional().describe("Gmail message ID being replied to (the server resolves the RFC 2822 Message-ID header automatically). When set, auto-populates To/CC with reply-all recipients unless replyAll is false."),
     replyAll: z.boolean().optional().default(true).describe("When replying (inReplyTo set), auto-populate To/CC with all original recipients. Set to false to only reply to sender. Default: true."),
 }).describe("Replace an existing draft's content. All message fields are required since this fully overwrites the draft.");

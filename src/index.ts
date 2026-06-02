@@ -314,6 +314,7 @@ async function resolveReplyMetadata(gmail: any, gmailMessageId: string): Promise
     subject?: string;
     replyAllTo: string[];
     replyAllCc: string[];
+    threadId?: string;
 }> {
     const response = await gmail.users.messages.get({
         userId: 'me',
@@ -348,6 +349,7 @@ async function resolveReplyMetadata(gmail: any, gmailMessageId: string): Promise
         subject,
         replyAllTo,
         replyAllCc,
+        threadId: response.data.threadId || undefined,
     };
 }
 
@@ -360,6 +362,11 @@ async function handleEmailAction(action: "send" | "draft", validatedArgs: any, g
         if (validatedArgs.inReplyTo) {
             const resolved = await resolveReplyMetadata(gmail, validatedArgs.inReplyTo);
             validatedArgs.inReplyTo = resolved.rfc2822MessageId;
+            // Auto-thread: file into the replied-to message's thread unless the caller set one.
+            // Without this, a reply with only inReplyTo lands as a brand-new thread in the mailbox.
+            if (!validatedArgs.threadId && resolved.threadId) {
+                validatedArgs.threadId = resolved.threadId;
+            }
             // Add Re: prefix to subject if this is a reply and subject doesn't already have it
             if (validatedArgs.subject && !validatedArgs.subject.match(/^Re:/i) && resolved.subject) {
                 validatedArgs.subject = `Re: ${resolved.subject}`;
@@ -508,6 +515,10 @@ async function main() {
         if (args.inReplyTo) {
             const resolved = await resolveReplyMetadata(gmail, args.inReplyTo);
             args.inReplyTo = resolved.rfc2822MessageId;
+            // Auto-thread: file into the replied-to message's thread unless the caller set one.
+            if (!args.threadId && resolved.threadId) {
+                args.threadId = resolved.threadId;
+            }
             if (args.subject && !args.subject.match(/^Re:/i) && resolved.subject) {
                 args.subject = `Re: ${resolved.subject}`;
             }
@@ -1055,7 +1066,7 @@ Get the threadId from read_email output (shown as "Thread ID: ...").`,
     // ── Attachment Tool ─────────────────────────────────────────────
 
     server.registerTool("download_attachment", {
-        description: "Downloads an email attachment to a specified location",
+        description: "Downloads an email attachment. Use savePath (directory to save into) and filename (desired filename) as separate params. Do NOT use saveToPath — that param does not exist and will be silently ignored.",
         inputSchema: withAccount(DownloadAttachmentSchema.shape),
         annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     }, async (args) => {
