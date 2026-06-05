@@ -165,7 +165,8 @@ export const UpdateDraftSchema = z.object({
     threadId: z.string().optional().describe("Thread ID to preserve threading. Optional: auto-derived from inReplyTo when that's set."),
     inReplyTo: z.string().optional().describe("Gmail message ID being replied to (the server resolves the RFC 2822 Message-ID header automatically). When set, auto-populates To/CC with reply-all recipients unless replyAll is false."),
     replyAll: z.boolean().optional().default(true).describe("When replying (inReplyTo set), auto-populate To/CC with all original recipients. Set to false to only reply to sender. Default: true."),
-}).describe("Replace an existing draft's content. All message fields are required since this fully overwrites the draft.");
+    attachments: z.array(z.string()).optional().describe("List of file paths to attach. Because update fully overwrites the draft, you MUST re-list every attachment you want to keep — any attachment not included here is dropped."),
+}).describe("Replace an existing draft's content. All message fields are required since this fully overwrites the draft, including attachments (re-list them or they are dropped).");
 
 export const DeleteDraftSchema = z.object({
     draftId: z.string().describe("ID of the draft to permanently delete (get this from get_drafts)"),

@@ -506,7 +506,7 @@ async function main() {
     });
 
     server.registerTool("update_draft", {
-        description: "Replace an existing draft's content. Fully overwrites the draft — include all message fields.",
+        description: "Replace an existing draft's content. Fully overwrites the draft — include all message fields, including attachments (re-list every file to keep, or they are dropped).",
         inputSchema: withAccount(UpdateDraftSchema.shape),
         annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     }, async (args) => {
@@ -531,7 +531,11 @@ async function main() {
                 }
             }
         }
-        const message = createEmailMessage(args);
+        // Build with attachments (nodemailer) when present, else the plain builder.
+        // update fully overwrites the draft, so callers must re-list attachments to keep them.
+        const message = (args.attachments && args.attachments.length > 0)
+            ? await createEmailWithNodemailer(args)
+            : createEmailMessage(args);
         const encodedMessage = Buffer.from(message).toString('base64')
             .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
         const messageRequest: any = { raw: encodedMessage };
