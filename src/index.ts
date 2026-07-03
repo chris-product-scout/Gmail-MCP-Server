@@ -432,6 +432,41 @@ async function main() {
 
     const server = new McpServer({ name: "gmail", version: "2.0.0" });
 
+    // ── Safe mode: read + draft only (opt-in via GMAIL_SAFE_MODE=1) ──
+    // For untrusted deployments (e.g. a shared server / agent) that should be
+    // able to READ mail and CREATE/EDIT drafts, but must never send, delete,
+    // archive, relabel, or change filters. Enforced by not registering the
+    // capability at all — an absent tool cannot be called.
+    //
+    // Default-deny: only the names below are exposed; anything else (including
+    // tools added by future updates) is blocked until explicitly allowlisted.
+    // Leave GMAIL_SAFE_MODE unset for full behavior (unchanged default).
+    const SAFE_MODE = process.env.GMAIL_SAFE_MODE === '1';
+    const SAFE_MODE_ALLOWED = new Set<string>([
+        // read / search
+        "read_email", "search_emails", "get_thread_messages", "batch_read_emails",
+        "get_drafts", "list_email_labels", "list_filters", "get_filter",
+        "download_attachment",
+        // draft create + edit (never sends)
+        "draft_email", "update_draft",
+    ]);
+    if (SAFE_MODE) {
+        const _registerTool = (server.registerTool as any).bind(server);
+        (server as any).registerTool = (name: string, ...rest: any[]) => {
+            if (!SAFE_MODE_ALLOWED.has(name)) {
+                return; // skip: blocked in safe mode
+            }
+            return _registerTool(name, ...rest);
+        };
+        console.error(
+            `[gmail-mcp] GMAIL_SAFE_MODE on — exposing read + draft only: ` +
+            `${[...SAFE_MODE_ALLOWED].sort().join(", ")}. ` +
+            `Blocked: send_email, send_draft, delete_email, batch_delete_emails, ` +
+            `modify_email, batch_modify_emails, archive_thread, delete_draft, ` +
+            `label CRUD, filter CRUD.`
+        );
+    }
+
     // ── Send & Draft Tools ──────────────────────────────────────────
 
     server.registerTool("send_email", {
