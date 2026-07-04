@@ -16,6 +16,7 @@ import { createLabel, updateLabel, deleteLabel, listLabels, findLabelByName, get
 import { createFilter, listFilters, getFilter, deleteFilter, filterTemplates, GmailFilterCriteria, GmailFilterAction } from "./filter-manager.js";
 import { convert as htmlToText } from 'html-to-text';
 import { loadMultiAccountTokens, createAccountClients, filterByAllowedAccounts, resolveAccountId, type AccountClients } from './token-manager.js';
+import { isSafeModeEnabled, installSafeMode, assertSafeModeToolset, confineSafeModeWrite } from './safe-mode.js';
 import {
     withAccount,
     SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema,
@@ -432,39 +433,15 @@ async function main() {
 
     const server = new McpServer({ name: "gmail", version: "2.0.0" });
 
-    // ── Safe mode: read + draft only (opt-in via GMAIL_SAFE_MODE=1) ──
-    // For untrusted deployments (e.g. a shared server / agent) that should be
-    // able to READ mail and CREATE/EDIT drafts, but must never send, delete,
-    // archive, relabel, or change filters. Enforced by not registering the
-    // capability at all — an absent tool cannot be called.
-    //
-    // Default-deny: only the names below are exposed; anything else (including
-    // tools added by future updates) is blocked until explicitly allowlisted.
-    // Leave GMAIL_SAFE_MODE unset for full behavior (unchanged default).
-    const SAFE_MODE = process.env.GMAIL_SAFE_MODE === '1';
-    const SAFE_MODE_ALLOWED = new Set<string>([
-        // read / search
-        "read_email", "search_emails", "get_thread_messages", "batch_read_emails",
-        "get_drafts", "list_email_labels", "list_filters", "get_filter",
-        "download_attachment",
-        // draft create + edit (never sends)
-        "draft_email", "update_draft",
-    ]);
+    // ── Safe mode: read + draft only (opt-in via GMAIL_SAFE_MODE) ──────
+    // See ./safe-mode.ts. Off by default; existing full-capability deployments
+    // are unchanged. The mode is logged either way so a misconfigured flag can't
+    // silently leave protection off.
+    const SAFE_MODE = isSafeModeEnabled();
     if (SAFE_MODE) {
-        const _registerTool = (server.registerTool as any).bind(server);
-        (server as any).registerTool = (name: string, ...rest: any[]) => {
-            if (!SAFE_MODE_ALLOWED.has(name)) {
-                return; // skip: blocked in safe mode
-            }
-            return _registerTool(name, ...rest);
-        };
-        console.error(
-            `[gmail-mcp] GMAIL_SAFE_MODE on — exposing read + draft only: ` +
-            `${[...SAFE_MODE_ALLOWED].sort().join(", ")}. ` +
-            `Blocked: send_email, send_draft, delete_email, batch_delete_emails, ` +
-            `modify_email, batch_modify_emails, archive_thread, delete_draft, ` +
-            `label CRUD, filter CRUD.`
-        );
+        installSafeMode(server);
+    } else {
+        console.error(`[gmail-mcp] GMAIL_SAFE_MODE off — full capability (send/delete/modify enabled).`);
     }
 
     // ── Send & Draft Tools ──────────────────────────────────────────
@@ -809,9 +786,16 @@ Pairs with search_emails: first search to get IDs, then batch_read to get bodies
         for (const id of pendingIds) failures.push({ id, error: 'Rate limited after retries' });
 
         if (args.output_path) {
-            fs.writeFileSync(args.output_path, JSON.stringify(allResults, null, 2));
+            // Safe mode: confine the write to a sandbox dir (basename only) so a
+            // coerced read tool cannot overwrite server code or credentials.
+            const outPath = SAFE_MODE
+                ? confineSafeModeWrite(args.output_path, 'batch-read.json')
+                : args.output_path;
+            const outDir = path.dirname(outPath);
+            if (SAFE_MODE && !fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
+            fs.writeFileSync(outPath, JSON.stringify(allResults, null, 2));
             return {
-                content: [{ type: "text" as const, text: `Batch read complete. ${allResults.length} emails written to ${args.output_path}` + (failures.length > 0 ? `\n${failures.length} failed: ${failures.map(f => `${f.id} (${f.error})`).join(', ')}` : '') }],
+                content: [{ type: "text" as const, text: `Batch read complete. ${allResults.length} emails written to ${outPath}` + (failures.length > 0 ? `\n${failures.length} failed: ${failures.map(f => `${f.id} (${f.error})`).join(', ')}` : '') }],
             };
         }
 
@@ -1132,8 +1116,13 @@ Get the threadId from read_email output (shown as "Thread ID: ...").`,
                 filename = findAttachment(messageResponse.data.payload) || `attachment-${args.attachmentId}`;
             }
 
-            if (!fs.existsSync(savePath)) fs.mkdirSync(savePath, { recursive: true });
-            const fullPath = path.join(savePath, filename);
+            // Safe mode: confine the write to a sandbox dir (basename only) so a
+            // coerced read tool cannot overwrite server code or credentials.
+            const fullPath = SAFE_MODE
+                ? confineSafeModeWrite(filename, `attachment-${args.attachmentId}`)
+                : path.join(savePath, filename);
+            const targetDir = path.dirname(fullPath);
+            if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
             fs.writeFileSync(fullPath, buffer);
 
             return { content: [{ type: "text" as const, text: `Attachment downloaded successfully:\nFile: ${filename}\nSize: ${buffer.length} bytes\nSaved to: ${fullPath}` }] };
@@ -1141,6 +1130,13 @@ Get the threadId from read_email output (shown as "Thread ID: ...").`,
             return { content: [{ type: "text" as const, text: `Failed to download attachment: ${error.message}` }] };
         }
     });
+
+    // Defense-in-depth: after all registrations, hard-fail boot if any
+    // non-allowlisted tool reached the registry via a path other than the
+    // wrapped registerTool (e.g. the SDK's legacy server.tool()).
+    if (SAFE_MODE) {
+        assertSafeModeToolset(server);
+    }
 
     // ── Start Server ────────────────────────────────────────────────
 
