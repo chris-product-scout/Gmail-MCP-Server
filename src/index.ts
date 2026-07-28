@@ -316,15 +316,22 @@ async function resolveReplyMetadata(gmail: any, gmailMessageId: string): Promise
     replyAllTo: string[];
     replyAllCc: string[];
     threadId?: string;
+    references: string;
 }> {
     const response = await gmail.users.messages.get({
         userId: 'me',
         id: gmailMessageId,
         format: 'metadata',
-        metadataHeaders: ['Message-ID', 'Subject', 'From', 'To', 'Cc', 'Reply-To'],
+        // Both Message-ID spellings requested defensively in case the API-side
+        // filter ever matches case-sensitively.
+        metadataHeaders: ['Message-ID', 'Message-Id', 'Subject', 'From', 'To', 'Cc', 'Reply-To', 'References'],
     });
     const headers = response.data.payload?.headers || [];
-    const getHeader = (name: string) => headers.find((h: any) => h.name === name)?.value || '';
+    // Header names come back with the sending client's original casing
+    // (Message-ID vs Message-Id vs message-id) — must match case-insensitively.
+    // An exact match here silently missed Superhuman-sent messages ("Message-Id"),
+    // producing drafts whose In-Reply-To was the raw Gmail id (see below).
+    const getHeader = (name: string) => headers.find((h: any) => h.name.toLowerCase() === name.toLowerCase())?.value || '';
 
     const messageIdHeader = getHeader('Message-ID');
     const subject = getHeader('Subject');
@@ -332,6 +339,7 @@ async function resolveReplyMetadata(gmail: any, gmailMessageId: string): Promise
     const from = getHeader('From');
     const to = getHeader('To');
     const cc = getHeader('Cc');
+    const parentReferences = getHeader('References');
 
     // Get the authenticated user's email to exclude from recipients
     const profile = await gmail.users.getProfile({ userId: 'me' });
@@ -346,11 +354,18 @@ async function resolveReplyMetadata(gmail: any, gmailMessageId: string): Promise
     const replyAllCc = [...parseAddresses(to), ...parseAddresses(cc)];
 
     return {
-        rfc2822MessageId: messageIdHeader || gmailMessageId,
+        // NO fallback to the raw Gmail API id: it is not a valid RFC 2822 Message-ID,
+        // and writing it into In-Reply-To breaks thread anchoring in clients like
+        // Superhuman (the draft/reply nests mid-thread instead of at the bottom).
+        // Empty string means "omit the header" — threadId alone still files the
+        // message into the correct thread.
+        rfc2822MessageId: messageIdHeader,
         subject,
         replyAllTo,
         replyAllCc,
         threadId: response.data.threadId || undefined,
+        // RFC 5322: a reply's References = parent's References + parent's Message-ID
+        references: [parentReferences, messageIdHeader].filter(Boolean).join(' '),
     };
 }
 
@@ -362,7 +377,8 @@ async function handleEmailAction(action: "send" | "draft", validatedArgs: any, g
         // Resolve inReplyTo: fetch RFC 2822 Message-ID and auto-populate reply-all recipients
         if (validatedArgs.inReplyTo) {
             const resolved = await resolveReplyMetadata(gmail, validatedArgs.inReplyTo);
-            validatedArgs.inReplyTo = resolved.rfc2822MessageId;
+            validatedArgs.inReplyTo = resolved.rfc2822MessageId || undefined;
+            validatedArgs.references = resolved.references || undefined;
             // Auto-thread: file into the replied-to message's thread unless the caller set one.
             // Without this, a reply with only inReplyTo lands as a brand-new thread in the mailbox.
             if (!validatedArgs.threadId && resolved.threadId) {
@@ -526,7 +542,8 @@ async function main() {
         // Resolve inReplyTo: fetch RFC 2822 Message-ID and auto-populate reply-all recipients
         if (args.inReplyTo) {
             const resolved = await resolveReplyMetadata(gmail, args.inReplyTo);
-            args.inReplyTo = resolved.rfc2822MessageId;
+            args.inReplyTo = resolved.rfc2822MessageId || undefined;
+            (args as any).references = resolved.references || undefined;
             // Auto-thread: file into the replied-to message's thread unless the caller set one.
             if (!args.threadId && resolved.threadId) {
                 args.threadId = resolved.threadId;
