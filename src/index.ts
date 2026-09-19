@@ -11,7 +11,7 @@ import { fileURLToPath } from 'url';
 import http from 'http';
 import open from 'open';
 import os from 'os';
-import {createEmailMessage, createEmailWithNodemailer} from "./utl.js";
+import {createEmailMessage, createEmailWithNodemailer, parseAddressList} from "./utl.js";
 import { createLabel, updateLabel, deleteLabel, listLabels, findLabelByName, getOrCreateLabel, GmailLabel } from "./label-manager.js";
 import { createFilter, listFilters, getFilter, deleteFilter, filterTemplates, GmailFilterCriteria, GmailFilterAction } from "./filter-manager.js";
 import { convert as htmlToText } from 'html-to-text';
@@ -345,9 +345,11 @@ async function resolveReplyMetadata(gmail: any, gmailMessageId: string): Promise
     const profile = await gmail.users.getProfile({ userId: 'me' });
     const myEmail = (profile.data.emailAddress || '').toLowerCase();
 
-    // Parse comma-separated email lists, filtering out our own address
-    const parseAddresses = (header: string): string[] =>
-        header.split(',').map(s => s.trim()).filter(s => s && !s.toLowerCase().includes(myEmail));
+    // Parse address lists with a real RFC 5322 parser, keeping display names.
+    // The previous `header.split(',')` mangled any quoted name containing a comma
+    // ("Wan, Andrea" <a@b.com>) into two malformed recipients, and its substring
+    // exclusion dropped EVERY recipient whenever myEmail resolved to an empty string.
+    const parseAddresses = (header: string): string[] => parseAddressList(header, myEmail);
 
     // Reply-All: To = Reply-To or From; CC = original To + CC minus ourselves
     const replyAllTo = replyTo ? [replyTo] : from ? [from] : [];
