@@ -2,7 +2,8 @@
 //
 // For untrusted deployments (e.g. a shared cloud box / autonomous agent) that
 // should be able to READ mail and CREATE/EDIT drafts, but must NEVER send,
-// delete, archive, relabel, or change filters.
+// delete, relabel, or change filters. A separate, explicit archive-only opt-in
+// can expose a narrow fixed-action archive tool.
 //
 // Enforcement is layered (belt + suspenders):
 //   1. installSafeMode() wraps server.registerTool so only allowlisted tools
@@ -43,16 +44,49 @@ export const SAFE_MODE_FORBIDDEN: ReadonlySet<string> = new Set<string>([
     "create_filter", "delete_filter", "create_filter_from_template",
 ]);
 
+const TRUE_VALUES = new Set(["1", "true", "yes", "on"]);
+const FALSE_VALUES = new Set(["0", "false", "no", "off"]);
+
+function parseBooleanEnv(name: string, raw: string | undefined, defaultValue: boolean): boolean {
+    if (raw == null || raw.trim() === "") return defaultValue;
+    let value = raw.trim();
+    // Hermes's scalar config setter preserves quoted YAML literals in MCP env
+    // values (for example `"1"`). Accept one balanced quote layer while
+    // continuing to reject every other unexpected value.
+    if ((value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))) {
+        value = value.slice(1, -1).trim();
+    }
+    value = value.toLowerCase();
+    if (TRUE_VALUES.has(value)) return true;
+    if (FALSE_VALUES.has(value)) return false;
+    throw new Error(`[gmail-mcp] Invalid ${name}; refusing to start.`);
+}
+
+/**
+ * Archive opt-in: adds only archive_emails, which can remove only the INBOX
+ * label from exact Gmail message IDs. It cannot send, delete, relabel, or
+ * archive whole threads. It is valid only alongside GMAIL_SAFE_MODE=1.
+ */
+export function effectiveSafeModeAllowed(env: NodeJS.ProcessEnv = process.env): ReadonlySet<string> {
+    const archiveEnabled = parseBooleanEnv(
+        "GMAIL_SAFE_MODE_ALLOW_ARCHIVE", env.GMAIL_SAFE_MODE_ALLOW_ARCHIVE, false
+    );
+    if (archiveEnabled && !isSafeModeEnabled(env)) {
+        throw new Error("[gmail-mcp] GMAIL_SAFE_MODE_ALLOW_ARCHIVE requires GMAIL_SAFE_MODE=1; refusing to start.");
+    }
+    const allowed = new Set(SAFE_MODE_ALLOWED);
+    if (archiveEnabled) allowed.add("archive_emails");
+    return allowed;
+}
+
 /**
  * Whether safe mode is engaged. Normalizes the env value (trim + case-insensitive)
  * so a stray newline/quote from a templated or YAML-quoted env var can't silently
  * fail open. Accepts 1 / true / yes / on.
  */
 export function isSafeModeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-    const raw = env.GMAIL_SAFE_MODE;
-    if (raw == null) return false;
-    const v = raw.trim().toLowerCase();
-    return v === "1" || v === "true" || v === "yes" || v === "on";
+    return parseBooleanEnv("GMAIL_SAFE_MODE", env.GMAIL_SAFE_MODE, false);
 }
 
 /**
@@ -80,10 +114,14 @@ export function confineSafeModeWrite(requestedPath: string | undefined, fallback
  * tool is registered. The wrapper is installed as a non-writable own property so
  * it can't be reassigned away later in the process.
  */
-export function installSafeMode(server: McpServer): void {
+export function installSafeMode(
+    server: McpServer,
+    env: NodeJS.ProcessEnv = process.env
+): ReadonlySet<string> {
+    const allowed = effectiveSafeModeAllowed(env);
     const original = (server.registerTool as any).bind(server);
     const wrapped = (name: string, ...rest: any[]) => {
-        if (!SAFE_MODE_ALLOWED.has(name)) {
+        if (!allowed.has(name)) {
             return; // blocked in safe mode — never registered
         }
         return original(name, ...rest);
@@ -95,31 +133,25 @@ export function installSafeMode(server: McpServer): void {
         enumerable: false,
     });
     console.error(
-        `[gmail-mcp] GMAIL_SAFE_MODE ON — read + draft only. ` +
-        `Exposing (${SAFE_MODE_ALLOWED.size}): ${[...SAFE_MODE_ALLOWED].sort().join(", ")}. ` +
-        `Blocked: ${[...SAFE_MODE_FORBIDDEN].sort().join(", ")}.`
+        `[gmail-mcp] GMAIL_SAFE_MODE ON. Exposing (${allowed.size}): ` +
+        `${[...allowed].sort().join(", ")}.`
     );
+    return allowed;
 }
 
 /**
  * Defense-in-depth: after all tools are registered, verify the live registered
  * toolset contains ONLY allowlisted tools. Throws (hard boot failure) on any
- * non-allowlisted tool — catching anything that reached the registry via a path
- * other than the wrapped registerTool. Fails closed on a violation; if the SDK's
- * internal registry can't be read, logs a loud warning rather than silently
- * assuming safety.
+ * (e.g. the SDK's legacy server.tool()). This makes the default-deny
+ * promise hold even if a future edit bypasses the wrapper. If the SDK registry
+ * cannot be inspected, safe-mode startup fails rather than assuming safety.
  */
-export function assertSafeModeToolset(server: McpServer): void {
+export function assertSafeModeToolset(server: McpServer, allowed: ReadonlySet<string>): void {
     const registered = (server as any)._registeredTools;
     if (!registered || typeof registered !== "object") {
-        console.error(
-            `[gmail-mcp] WARNING: cannot read the SDK tool registry to verify safe mode ` +
-            `(SDK internals may have changed). The registerTool wrapper is still active, ` +
-            `but the post-registration invariant is unchecked.`
-        );
-        return;
+        throw new Error("[gmail-mcp] Cannot inspect SDK tool registry in safe mode; refusing to start.");
     }
-    const leaked = Object.keys(registered).filter((name) => !SAFE_MODE_ALLOWED.has(name));
+    const leaked = Object.keys(registered).filter((name) => !allowed.has(name));
     if (leaked.length > 0) {
         throw new Error(
             `[gmail-mcp] SAFE MODE INVARIANT VIOLATED: non-allowlisted tool(s) registered: ` +

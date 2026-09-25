@@ -31,8 +31,10 @@ export function createEmailMessage(validatedArgs: any): string {
     const boundary = `----=_NextPart_${Math.random().toString(36).substring(2)}`;
 
     // Common email headers
+    // NOTE: no From header — Gmail fills in the default send-as identity
+    // (including display name, e.g. "Chris Lee <chrislee82@gmail.com>") at
+    // send time. A literal 'From: me' made Gmail send with the bare address.
     const emailParts = [
-        'From: me',
         `To: ${validatedArgs.to.join(', ')}`,
         validatedArgs.cc ? `Cc: ${validatedArgs.cc.join(', ')}` : '',
         validatedArgs.bcc ? `Bcc: ${validatedArgs.bcc.join(', ')}` : '',
@@ -109,7 +111,8 @@ export async function createEmailWithNodemailer(validatedArgs: any): Promise<str
     }
 
     const mailOptions = {
-        from: 'me', // Gmail API will replace this with the authenticated user
+        // No 'from': Gmail applies the account's default send-as identity
+        // (with display name) when the header is absent.
         to: validatedArgs.to.join(', '),
         cc: validatedArgs.cc?.join(', '),
         bcc: validatedArgs.bcc?.join(', '),

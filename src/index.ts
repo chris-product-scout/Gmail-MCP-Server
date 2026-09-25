@@ -24,7 +24,7 @@ import {
     DeleteLabelSchema, GetOrCreateLabelSchema, BatchModifyEmailsSchema, BatchDeleteEmailsSchema,
     BatchReadEmailsSchema, CreateFilterSchema, ListFiltersSchema, GetFilterSchema,
     DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema,
-    GetThreadMessagesSchema, ArchiveThreadSchema, GetDraftsSchema, UpdateDraftSchema,
+    GetThreadMessagesSchema, ArchiveThreadSchema, ArchiveEmailsSchema, GetDraftsSchema, UpdateDraftSchema,
     DeleteDraftSchema, SendDraftSchema,
 } from './schemas.js';
 
@@ -449,14 +449,13 @@ async function main() {
 
     const server = new McpServer({ name: "gmail", version: "2.0.0" });
 
-    // ── Safe mode: read + draft only (opt-in via GMAIL_SAFE_MODE) ──────
+    // ── Safe mode: read + draft, with a separate archive-only opt-in ─────
     // See ./safe-mode.ts. Off by default; existing full-capability deployments
     // are unchanged. The mode is logged either way so a misconfigured flag can't
     // silently leave protection off.
     const SAFE_MODE = isSafeModeEnabled();
-    if (SAFE_MODE) {
-        installSafeMode(server);
-    } else {
+    const safeModeAllowed = SAFE_MODE ? installSafeMode(server) : undefined;
+    if (!SAFE_MODE) {
         console.error(`[gmail-mcp] GMAIL_SAFE_MODE off — full capability (send/delete/modify enabled).`);
     }
 
@@ -942,6 +941,22 @@ Get the threadId from read_email output (shown as "Thread ID: ...").`,
         }
     });
 
+    // This safe-mode opt-in accepts exact message IDs and has no caller-controlled
+    // labels or thread scope. It is the only mutation that may be allowlisted.
+    server.registerTool("archive_emails", {
+        description: "Archives exact Gmail messages by removing only their INBOX label (max 50). It cannot delete, send, relabel, or archive an entire thread.",
+        inputSchema: withAccount(ArchiveEmailsSchema.shape),
+        annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+    }, async (args) => {
+        const { gmail } = getClients(args.account);
+        const messageIds = [...new Set(args.messageIds)];
+        await gmail.users.messages.batchModify({
+            userId: 'me',
+            requestBody: { ids: messageIds, removeLabelIds: ['INBOX'] },
+        });
+        return { content: [{ type: "text" as const, text: `Archived ${messageIds.length} exact message(s) by removing only the INBOX label.` }] };
+    });
+
     // ── Label Tools ─────────────────────────────────────────────────
 
     server.registerTool("list_email_labels", {
@@ -1152,7 +1167,7 @@ Get the threadId from read_email output (shown as "Thread ID: ...").`,
     // non-allowlisted tool reached the registry via a path other than the
     // wrapped registerTool (e.g. the SDK's legacy server.tool()).
     if (SAFE_MODE) {
-        assertSafeModeToolset(server);
+        assertSafeModeToolset(server, safeModeAllowed!);
     }
 
     // ── Start Server ────────────────────────────────────────────────

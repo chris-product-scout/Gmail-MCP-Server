@@ -146,6 +146,12 @@ export const ArchiveThreadSchema = z.object({
     threadId: z.string().describe("ID of the thread to archive (get this from read_email output)"),
 });
 
+/** Safe-mode archive action: exact messages only; no caller-controlled labels. */
+export const ArchiveEmailsSchema = z.object({
+    messageIds: z.array(z.string().min(1)).min(1).max(50)
+        .describe("Exact Gmail message IDs to archive (removes only the INBOX label; max 50)"),
+});
+
 export const GetDraftsSchema = z.object({
     draftId: z.string().optional().describe("ID of a specific draft to retrieve with full content. Omit to list all drafts with metadata (subject, to, date)."),
     maxResults: z.number().optional().describe("Max drafts to return when listing (default 100). Ignored when draftId is provided."),
