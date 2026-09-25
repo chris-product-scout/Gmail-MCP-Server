@@ -9,13 +9,13 @@ export function withAccount<T extends Record<string, z.ZodTypeAny>>(shape: T) {
 }
 
 export const SendEmailSchema = z.object({
-    to: z.array(z.string()).describe("List of recipient email addresses"),
+    to: z.array(z.string()).describe('Recipients. Include the display name whenever you know it: "Andrea Wan <andrea@example.com>". A bare address works too, but a name-less To line reads as impersonal.'),
     subject: z.string().describe("Email subject"),
     body: z.string().describe("Email body content (used for text/plain or when htmlBody not provided)"),
     htmlBody: z.string().optional().describe("HTML version of the email body"),
     mimeType: z.enum(['text/plain', 'text/html', 'multipart/alternative']).optional().default('text/plain').describe("Email content type"),
-    cc: z.array(z.string()).optional().describe("List of CC recipients"),
-    bcc: z.array(z.string()).optional().describe("List of BCC recipients"),
+    cc: z.array(z.string()).optional().describe('CC recipients. Same "Name <email>" format as `to`.'),
+    bcc: z.array(z.string()).optional().describe('BCC recipients. Same "Name <email>" format as `to`.'),
     threadId: z.string().optional().describe("Thread ID to file the message into. Optional: when inReplyTo is set this is auto-derived from the replied-to message, so you normally don't need to pass it for replies."),
     inReplyTo: z.string().optional().describe("Gmail message ID being replied to (the server resolves the RFC 2822 Message-ID header automatically). When set, auto-populates To/CC with reply-all recipients unless replyAll is false."),
     replyAll: z.boolean().optional().default(true).describe("When replying (inReplyTo set), auto-populate To/CC with all original recipients. Set to false to only reply to sender. Default: true."),
@@ -161,13 +161,13 @@ export const GetDraftsSchema = z.object({
 
 export const UpdateDraftSchema = z.object({
     draftId: z.string().describe("ID of the draft to update (get this from get_drafts)"),
-    to: z.array(z.string()).describe("List of recipient email addresses"),
+    to: z.array(z.string()).describe('Recipients. Include the display name whenever you know it: "Andrea Wan <andrea@example.com>". A bare address works too, but a name-less To line reads as impersonal.'),
     subject: z.string().describe("Email subject"),
     body: z.string().describe("Email body content (plain text)"),
     htmlBody: z.string().optional().describe("HTML version of the email body"),
     mimeType: z.enum(['text/plain', 'text/html', 'multipart/alternative']).optional().default('text/plain').describe("Email content type"),
-    cc: z.array(z.string()).optional().describe("List of CC recipients"),
-    bcc: z.array(z.string()).optional().describe("List of BCC recipients"),
+    cc: z.array(z.string()).optional().describe('CC recipients. Same "Name <email>" format as `to`.'),
+    bcc: z.array(z.string()).optional().describe('BCC recipients. Same "Name <email>" format as `to`.'),
     threadId: z.string().optional().describe("Thread ID to preserve threading. Optional: auto-derived from inReplyTo when that's set."),
     inReplyTo: z.string().optional().describe("Gmail message ID being replied to (the server resolves the RFC 2822 Message-ID header automatically). When set, auto-populates To/CC with reply-all recipients unless replyAll is false."),
     replyAll: z.boolean().optional().default(true).describe("When replying (inReplyTo set), auto-populate To/CC with all original recipients. Set to false to only reply to sender. Default: true."),
