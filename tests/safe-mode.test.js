@@ -21,7 +21,9 @@ const EXPECTED_BASE = [
     'search_emails', 'update_draft',
 ].sort();
 const EXPECTED_ARCHIVE = [...EXPECTED_BASE, 'archive_emails'].sort();
+const EXPECTED_DELETE_DRAFT = [...EXPECTED_BASE, 'delete_draft'].sort();
 const SAFE_ENV = { GMAIL_SAFE_MODE: '1' };
+const DELETE_DRAFT_ENV = { GMAIL_SAFE_MODE: '1', GMAIL_SAFE_MODE_ALLOW_DELETE_DRAFT: '1' };
 const ARCHIVE_ENV = { GMAIL_SAFE_MODE: '1', GMAIL_SAFE_MODE_ALLOW_ARCHIVE: '1' };
 
 function fakeServer() {
@@ -43,6 +45,7 @@ describe('GMAIL_SAFE_MODE base policy', () => {
         for (const name of SAFE_MODE_FORBIDDEN) {
             assert.ok(!SAFE_MODE_ALLOWED.has(name), `${name} must not be base-allowlisted`);
             assert.ok(!effectiveSafeModeAllowed(ARCHIVE_ENV).has(name), `${name} must not be archive-allowlisted`);
+            assert.ok(!effectiveSafeModeAllowed(DELETE_DRAFT_ENV).has(name), `${name} must not be delete-draft-allowlisted`);
         }
         for (const name of ['send_email', 'send_draft', 'delete_email', 'batch_delete_emails', 'delete_draft', 'modify_email', 'batch_modify_emails']) {
             assert.ok(!effectiveSafeModeAllowed(ARCHIVE_ENV).has(name), `${name} must not be exposed`);
@@ -68,6 +71,26 @@ describe('archive-only opt-in policy', () => {
     it('rejects invalid policy values and archive opt-in without safe mode', () => {
         assert.throws(() => effectiveSafeModeAllowed({ ...SAFE_ENV, GMAIL_SAFE_MODE_ALLOW_ARCHIVE: 'maybe' }), /Invalid GMAIL_SAFE_MODE_ALLOW_ARCHIVE/);
         assert.throws(() => effectiveSafeModeAllowed({ GMAIL_SAFE_MODE_ALLOW_ARCHIVE: '1' }), /requires GMAIL_SAFE_MODE=1/);
+    });
+});
+
+describe('draft-delete opt-in policy', () => {
+    it('adds exactly delete_draft in safe mode', () => {
+        assert.deepEqual([...effectiveSafeModeAllowed(DELETE_DRAFT_ENV)].sort(), EXPECTED_DELETE_DRAFT);
+        assert.deepEqual([...effectiveSafeModeAllowed({ ...SAFE_ENV, GMAIL_SAFE_MODE_ALLOW_DELETE_DRAFT: '"1"' })].sort(), EXPECTED_DELETE_DRAFT);
+        assert.ok(!effectiveSafeModeAllowed(DELETE_DRAFT_ENV).has('delete_email'));
+    });
+
+    it('stays off by default and composes with the archive opt-in', () => {
+        assert.ok(!effectiveSafeModeAllowed(SAFE_ENV).has('delete_draft'));
+        assert.ok(!effectiveSafeModeAllowed(ARCHIVE_ENV).has('delete_draft'));
+        const both = effectiveSafeModeAllowed({ ...ARCHIVE_ENV, GMAIL_SAFE_MODE_ALLOW_DELETE_DRAFT: '1' });
+        assert.deepEqual([...both].sort(), [...EXPECTED_BASE, 'archive_emails', 'delete_draft'].sort());
+    });
+
+    it('rejects invalid values and the opt-in without safe mode', () => {
+        assert.throws(() => effectiveSafeModeAllowed({ ...SAFE_ENV, GMAIL_SAFE_MODE_ALLOW_DELETE_DRAFT: 'maybe' }), /Invalid GMAIL_SAFE_MODE_ALLOW_DELETE_DRAFT/);
+        assert.throws(() => effectiveSafeModeAllowed({ GMAIL_SAFE_MODE_ALLOW_DELETE_DRAFT: '1' }), /requires GMAIL_SAFE_MODE=1/);
     });
 });
 

@@ -2,8 +2,8 @@
 //
 // For untrusted deployments (e.g. a shared cloud box / autonomous agent) that
 // should be able to READ mail and CREATE/EDIT drafts, but must NEVER send,
-// delete, relabel, or change filters. A separate, explicit archive-only opt-in
-// can expose a narrow fixed-action archive tool.
+// delete, relabel, or change filters. Two separate, explicit opt-ins can expose
+// narrow tools: archive-only (archive_emails) and draft-delete (delete_draft).
 //
 // Enforcement is layered (belt + suspenders):
 //   1. installSafeMode() wraps server.registerTool so only allowlisted tools
@@ -37,7 +37,7 @@ export const SAFE_MODE_ALLOWED: ReadonlySet<string> = new Set<string>([
  * fails loudly if any of these ever lands on the allowlist.
  */
 export const SAFE_MODE_FORBIDDEN: ReadonlySet<string> = new Set<string>([
-    "send_email", "send_draft", "delete_draft",
+    "send_email", "send_draft",
     "batch_modify_emails", "batch_delete_emails", "modify_email", "delete_email",
     "archive_thread",
     "create_label", "update_label", "delete_label", "get_or_create_label",
@@ -64,6 +64,10 @@ function parseBooleanEnv(name: string, raw: string | undefined, defaultValue: bo
 }
 
 /**
+ * Draft-delete opt-in: adds only delete_draft, which deletes one draft by draft
+ * ID. Gmail's drafts.delete is permanent (no Trash), but it cannot touch sent or
+ * received mail. It is valid only alongside GMAIL_SAFE_MODE=1.
+ *
  * Archive opt-in: adds only archive_emails, which can remove only the INBOX
  * label from exact Gmail message IDs. It cannot send, delete, relabel, or
  * archive whole threads. It is valid only alongside GMAIL_SAFE_MODE=1.
@@ -75,8 +79,15 @@ export function effectiveSafeModeAllowed(env: NodeJS.ProcessEnv = process.env): 
     if (archiveEnabled && !isSafeModeEnabled(env)) {
         throw new Error("[gmail-mcp] GMAIL_SAFE_MODE_ALLOW_ARCHIVE requires GMAIL_SAFE_MODE=1; refusing to start.");
     }
+    const deleteDraftEnabled = parseBooleanEnv(
+        "GMAIL_SAFE_MODE_ALLOW_DELETE_DRAFT", env.GMAIL_SAFE_MODE_ALLOW_DELETE_DRAFT, false
+    );
+    if (deleteDraftEnabled && !isSafeModeEnabled(env)) {
+        throw new Error("[gmail-mcp] GMAIL_SAFE_MODE_ALLOW_DELETE_DRAFT requires GMAIL_SAFE_MODE=1; refusing to start.");
+    }
     const allowed = new Set(SAFE_MODE_ALLOWED);
     if (archiveEnabled) allowed.add("archive_emails");
+    if (deleteDraftEnabled) allowed.add("delete_draft");
     return allowed;
 }
 
