@@ -226,3 +226,16 @@ export async function createEmailWithNodemailer(validatedArgs: any): Promise<str
     return rawMessage;
 }
 
+
+/**
+ * Pull the display headers out of a Gmail message payload's header list.
+ * Header names are matched case-insensitively. A missing header is '' so
+ * callers always get the same keys (to and cc included).
+ */
+export function summarizeMessageHeaders(headers: Array<{ name?: string | null; value?: string | null }> | undefined | null): {
+    subject: string; from: string; to: string; cc: string; date: string;
+} {
+    const find = (name: string): string =>
+        (headers || []).find(h => h.name?.toLowerCase() === name)?.value || '';
+    return { subject: find('subject'), from: find('from'), to: find('to'), cc: find('cc'), date: find('date') };
+}

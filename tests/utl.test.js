@@ -214,3 +214,20 @@ describe('long and pre-encoded names', () => {
         assert.equal((headerBlock.match(/somecompany\.com/g) || []).length, 15);
     });
 });
+
+import { summarizeMessageHeaders } from '../dist/utl.js';
+
+describe('summarizeMessageHeaders', () => {
+    it('returns to and cc alongside subject, from and date, case-insensitively', () => {
+        const r = summarizeMessageHeaders([
+            { name: 'SUBJECT', value: 'Hi' }, { name: 'From', value: 'a@x.com' },
+            { name: 'to', value: 'b@x.com, c@x.com' }, { name: 'Cc', value: 'd@x.com' },
+            { name: 'Date', value: 'Mon, 27 Oct 2026 10:00:00 -0700' },
+        ]);
+        assert.deepEqual(r, { subject: 'Hi', from: 'a@x.com', to: 'b@x.com, c@x.com', cc: 'd@x.com', date: 'Mon, 27 Oct 2026 10:00:00 -0700' });
+    });
+    it('gives empty strings for absent headers and tolerates no header list', () => {
+        assert.deepEqual(summarizeMessageHeaders(undefined), { subject: '', from: '', to: '', cc: '', date: '' });
+        assert.equal(summarizeMessageHeaders([{ name: 'From', value: 'a@x.com' }]).cc, '');
+    });
+});

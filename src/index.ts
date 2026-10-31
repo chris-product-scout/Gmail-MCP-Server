@@ -11,7 +11,7 @@ import { fileURLToPath } from 'url';
 import http from 'http';
 import open from 'open';
 import os from 'os';
-import {createEmailMessage, createEmailWithNodemailer, parseAddressList} from "./utl.js";
+import {createEmailMessage, createEmailWithNodemailer, parseAddressList, summarizeMessageHeaders} from "./utl.js";
 import { createLabel, updateLabel, deleteLabel, listLabels, findLabelByName, getOrCreateLabel, GmailLabel } from "./label-manager.js";
 import { createFilter, listFilters, getFilter, deleteFilter, filterTemplates, GmailFilterCriteria, GmailFilterAction } from "./filter-manager.js";
 import { convert as htmlToText } from 'html-to-text';
@@ -676,14 +676,14 @@ Use this tool when you need to find all related messages in a conversation threa
 
 Common use case: After reading an email with read_email (which returns Thread ID), use this tool to get all messages in that thread, then use batch_modify_emails to archive them all.
 
-Returns: Message ID, subject, sender, and date for each message in the thread.`,
+Returns: Message ID, subject, sender, To, Cc (when present) and date for each message in the thread.`,
         inputSchema: withAccount(GetThreadMessagesSchema.shape),
         annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     }, async (args) => {
         const { gmail } = getClients(args.account);
 
         try {
-            const response = await gmail.users.threads.get({ userId: 'me', id: args.threadId, format: 'metadata', metadataHeaders: ['Subject', 'From', 'Date'] });
+            const response = await gmail.users.threads.get({ userId: 'me', id: args.threadId, format: 'metadata', metadataHeaders: ['Subject', 'From', 'To', 'Cc', 'Date'] });
             const messages = response.data.messages || [];
 
             if (messages.length === 0) {
@@ -691,17 +691,11 @@ Returns: Message ID, subject, sender, and date for each message in the thread.`,
             }
 
             const results = messages.map((msg: any) => {
-                const headers = msg.payload?.headers || [];
-                return {
-                    id: msg.id, threadId: msg.threadId,
-                    subject: headers.find((h: any) => h.name === 'Subject')?.value || '',
-                    from: headers.find((h: any) => h.name === 'From')?.value || '',
-                    date: headers.find((h: any) => h.name === 'Date')?.value || '',
-                };
+                return { id: msg.id, threadId: msg.threadId, ...summarizeMessageHeaders(msg.payload?.headers) };
             });
 
             return {
-                content: [{ type: "text" as const, text: `Found ${results.length} message(s) in thread:\n\n` + results.map((r: any) => `ID: ${r.id}\nSubject: ${r.subject}\nFrom: ${r.from}\nDate: ${r.date}`).join('\n\n') }],
+                content: [{ type: "text" as const, text: `Found ${results.length} message(s) in thread:\n\n` + results.map((r: any) => `ID: ${r.id}\nSubject: ${r.subject}\nFrom: ${r.from}\nTo: ${r.to}${r.cc ? `\nCc: ${r.cc}` : ''}\nDate: ${r.date}`).join('\n\n') }],
             };
         } catch (error: any) {
             if (error.code === 404) {
@@ -718,7 +712,7 @@ Returns: Message ID, subject, sender, and date for each message in the thread.`,
 
 Use this instead of calling read_email in a loop. Fetches up to 100 emails in 1-2 HTTP requests.
 
-Returns JSON array of {id, threadId, subject, from, date, body} objects.
+Returns JSON array of {id, threadId, subject, from, to, cc, date, body, truncated} objects (to and cc are '' when the header is absent).
 Use output_path to write results to a file (recommended for 20+ emails to avoid token overflow).
 
 Pairs with search_emails: first search to get IDs, then batch_read to get bodies.`,
@@ -736,7 +730,7 @@ Pairs with search_emails: first search to get IDs, then batch_read to get bodies
             return { content: [{ type: "text" as const, text: "Maximum 100 message IDs per call." }] };
         }
 
-        const allResults: Array<{ id: string; threadId: string; subject: string; from: string; date: string; body: string; truncated: boolean }> = [];
+        const allResults: Array<{ id: string; threadId: string; subject: string; from: string; to: string; cc: string; date: string; body: string; truncated: boolean }> = [];
         const failures: Array<{ id: string; error: string }> = [];
 
         async function executeBatch(batchIds: string[]) {
@@ -771,11 +765,9 @@ Pairs with search_emails: first search to get IDs, then batch_read to get bodies
                 const msgData = item.data;
                 successIds.add(msgData.id);
                 const headers = msgData.payload?.headers || [];
-                const subject = headers.find((h: any) => h.name?.toLowerCase() === 'subject')?.value || '';
-                const from = headers.find((h: any) => h.name?.toLowerCase() === 'from')?.value || '';
-                const date = headers.find((h: any) => h.name?.toLowerCase() === 'date')?.value || '';
+                const { subject, from, to, cc, date } = summarizeMessageHeaders(headers);
                 const rawBody = getBodyText(msgData.payload as GmailMessagePart || {}, maxBodyLength);
-                successes.push({ id: msgData.id, threadId: msgData.threadId || '', subject, from, date, body: rawBody, truncated: maxBodyLength > 0 && rawBody.includes('[Truncated:') });
+                successes.push({ id: msgData.id, threadId: msgData.threadId || '', subject, from, to, cc, date, body: rawBody, truncated: maxBodyLength > 0 && rawBody.includes('[Truncated:') });
             }
 
             const knownIds = new Set([...successIds, ...hardFailures.map(f => f.id), ...retryIds.filter(id => id !== 'unknown')]);
