@@ -65,6 +65,19 @@ describe('getBodyText', () => {
         assert.equal(getBodyText(alt(NORMAL_PLAIN, html)), NORMAL_PLAIN);
     });
 
+    it('keeps the plain part\'s links when it switches to the HTML text', () => {
+        const plain = "I've shared an item with you: Draft Plan https://docs.example.com/d/abc123/edit?usp=sharing It's stored online.";
+        const html = '<p>Robin Example shared a document</p><p>Robin Example (robin@example.com) has invited you to edit the following document: Draft Plan</p><p>Robin Example is outside your organization.</p><p><a href="https://docs.example.com/d/abc123/edit">Open</a></p><p>Does this item look suspicious? Block sender</p>';
+        const body = getBodyText(alt(plain, html));
+        assert.match(body, /outside your organization/);
+        assert.match(body, /Links:\nhttps:\/\/docs\.example\.com\/d\/abc123\/edit\?usp=sharing$/);
+    });
+
+    it('ignores an attached HTML file when choosing the body', () => {
+        const payload = { mimeType: 'multipart/mixed', parts: [part('text/plain', 'See attached.'), { ...part('text/html', STUB_HTML), filename: 'report.html' }] };
+        assert.equal(getBodyText(payload), 'See attached.');
+    });
+
     it('keeps a long, complete plain part even when the HTML adds a sponsor block', () => {
         const article = 'Every piece of software you buy promises a little more control over the business. '.repeat(40);
         const html = `<p>${article}</p><p>Sponsored: imagine your brand taking center stage in front of three hundred thousand engaged subscribers, makers and operators across commerce, retail and growth.</p><p>Forwarded this email? Subscribe here for more exclusive offers.</p>`;

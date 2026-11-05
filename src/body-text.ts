@@ -38,9 +38,10 @@ const STUB_MAX_PLAIN_LENGTH = 2000;
 
 /**
  * Invisible characters that marketing mail pads its hidden preheader with
- * (combining grapheme joiner, soft hyphen, zero-width space/joiners, word joiner, BOM).
+ * (combining grapheme joiner, soft hyphen, zero-width space/joiners, direction marks,
+ * word joiner, BOM).
  */
-const INVISIBLE_FILLER = /[͏­​-‍⁠﻿]/g;
+const INVISIBLE_FILLER = /[\u034f\u00ad\u200b-\u200f\u2060\ufeff]/g;
 
 /**
  * Recursively extract email body content from MIME message parts
@@ -54,7 +55,7 @@ export function extractEmailContent(messagePart: GmailMessagePart): EmailContent
         const content = Buffer.from(messagePart.body.data, 'base64').toString('utf8');
         if (messagePart.mimeType === 'text/plain') {
             textContent = content;
-        } else if (messagePart.mimeType === 'text/html') {
+        } else if (messagePart.mimeType === 'text/html' && !messagePart.filename) {
             htmlContent = content;
         }
     }
@@ -110,18 +111,29 @@ export function plainIsStub(plain: string, htmlText: string): boolean {
 }
 
 /**
+ * The HTML conversion drops link targets, so append the plain part's URLs that the
+ * HTML text lacks (document links, confirmation links). The plain part is a short stub
+ * here, so this adds little.
+ */
+function withPlainLinks(htmlText: string, plain: string): string {
+    const urls = [...new Set(plain.match(/https?:\/\/[^\s<>\[\]()"]+/g) || [])]
+        .filter((u) => !htmlText.includes(u));
+    return urls.length ? `${htmlText}\n\nLinks:\n${urls.join('\n')}` : htmlText;
+}
+
+/**
  * Extract body text from a Gmail message payload.
  * Uses text/plain when it exists, unless the plain part is a stub of the HTML part
- * (see plainIsStub); then uses the HTML converted to text. With no plain part, converts
+ * (see plainIsStub); then uses the HTML converted to text, plus the plain part's links. With no plain part, converts
  * the HTML, falling back to a regex strip if conversion fails.
  */
 export function getBodyText(payload: GmailMessagePart, maxLength: number = 50000): string {
     const { text, html } = extractEmailContent(payload);
     let body = text;
-    if (body && html) {
+    if (body && html && body.trim().length < STUB_MAX_PLAIN_LENGTH) {
         try {
             const htmlText = convertHtml(html);
-            if (plainIsStub(body, htmlText)) body = htmlText;
+            if (plainIsStub(body, htmlText)) body = withPlainLinks(htmlText, body);
         } catch {
             // Keep the plain part if the HTML cannot be converted.
         }
