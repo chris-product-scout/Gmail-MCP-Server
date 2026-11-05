@@ -679,7 +679,7 @@ Pairs with search_emails: first search to get IDs, then batch_read to get bodies
                 const headers = msgData.payload?.headers || [];
                 const { subject, from, to, cc, date } = summarizeMessageHeaders(headers);
                 const rawBody = getBodyText(msgData.payload as GmailMessagePart || {}, maxBodyLength);
-                successes.push({ id: msgData.id, threadId: msgData.threadId || '', subject, from, to, cc, date, body: rawBody, truncated: maxBodyLength > 0 && rawBody.includes('[Truncated:') });
+                successes.push({ id: msgData.id, threadId: msgData.threadId || '', subject, from, to, cc, date, body: rawBody, truncated: maxBodyLength > 0 && rawBody.length > maxBodyLength });
             }
 
             const knownIds = new Set([...successIds, ...hardFailures.map(f => f.id), ...retryIds.filter(id => id !== 'unknown')]);

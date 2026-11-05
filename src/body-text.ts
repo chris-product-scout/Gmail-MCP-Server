@@ -135,7 +135,8 @@ export function getBodyText(payload: GmailMessagePart, maxLength: number = 50000
             const htmlText = convertHtml(html);
             if (plainIsStub(body, htmlText)) body = withPlainLinks(htmlText, body);
         } catch {
-            // Keep the plain part if the HTML cannot be converted.
+            // Keep the plain part, but say so: it may be a stub of the HTML.
+            body = `[Note: HTML part could not be converted; showing the plain-text part]\n\n${body}`;
         }
     } else if (!body && html) {
         try {
