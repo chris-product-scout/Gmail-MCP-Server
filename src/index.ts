@@ -14,7 +14,7 @@ import os from 'os';
 import {createEmailMessage, createEmailWithNodemailer, parseAddressList, summarizeMessageHeaders} from "./utl.js";
 import { createLabel, updateLabel, deleteLabel, listLabels, findLabelByName, getOrCreateLabel, GmailLabel } from "./label-manager.js";
 import { createFilter, listFilters, getFilter, deleteFilter, filterTemplates, GmailFilterCriteria, GmailFilterAction } from "./filter-manager.js";
-import { convert as htmlToText } from 'html-to-text';
+import { getBodyText, type GmailMessagePart } from './body-text.js';
 import { loadMultiAccountTokens, createAccountClients, filterByAllowedAccounts, resolveAccountId, type AccountClients } from './token-manager.js';
 import { isSafeModeEnabled, installSafeMode, assertSafeModeToolset, confineSafeModeWrite } from './safe-mode.js';
 import {
@@ -37,22 +37,6 @@ const CREDENTIALS_PATH = process.env.GMAIL_CREDENTIALS_PATH || path.join(CONFIG_
 const GMAIL_TOKEN_PATH = process.env.GMAIL_TOKEN_PATH || CREDENTIALS_PATH;
 
 // Type definitions for Gmail API responses
-interface GmailMessagePart {
-    partId?: string;
-    mimeType?: string;
-    filename?: string;
-    headers?: Array<{
-        name: string;
-        value: string;
-    }>;
-    body?: {
-        attachmentId?: string;
-        size?: number;
-        data?: string;
-    };
-    parts?: GmailMessagePart[];
-}
-
 interface EmailAttachment {
     id: string;
     filename: string;
@@ -60,81 +44,9 @@ interface EmailAttachment {
     size: number;
 }
 
-interface EmailContent {
-    text: string;
-    html: string;
-}
-
 // OAuth2 configuration
 let oauth2Client: OAuth2Client;
 let accountsMap: Map<string, AccountClients> = new Map();
-
-/**
- * Recursively extract email body content from MIME message parts
- * Handles complex email structures with nested parts
- */
-function extractEmailContent(messagePart: GmailMessagePart): EmailContent {
-    // Initialize containers for different content types
-    let textContent = '';
-    let htmlContent = '';
-
-    // If the part has a body with data, process it based on MIME type
-    if (messagePart.body && messagePart.body.data) {
-        const content = Buffer.from(messagePart.body.data, 'base64').toString('utf8');
-
-        // Store content based on its MIME type
-        if (messagePart.mimeType === 'text/plain') {
-            textContent = content;
-        } else if (messagePart.mimeType === 'text/html') {
-            htmlContent = content;
-        }
-    }
-
-    // If the part has nested parts, recursively process them
-    if (messagePart.parts && messagePart.parts.length > 0) {
-        for (const part of messagePart.parts) {
-            const { text, html } = extractEmailContent(part);
-            if (text) textContent += text;
-            if (html) htmlContent += html;
-        }
-    }
-
-    // Return both plain text and HTML content
-    return { text: textContent, html: htmlContent };
-}
-
-/**
- * Extract body text from a Gmail message payload.
- * Prefers plain text, falls back to HTML-to-text conversion, then regex strip.
- */
-function getBodyText(payload: GmailMessagePart, maxLength: number = 50000): string {
-    const { text, html } = extractEmailContent(payload);
-    let body = text;
-    if (!body && html) {
-        try {
-            body = htmlToText(html, {
-                wordwrap: false,
-                selectors: [
-                    { selector: 'img', format: 'skip' },
-                    { selector: 'a', options: { ignoreHref: true } }
-                ]
-            });
-        } catch {
-            body = html
-                .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-                .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-                .replace(/<[^>]+>/g, ' ')
-                .replace(/\s+/g, ' ')
-                .trim();
-            body = `[Note: HTML conversion failed, showing simplified text]\n\n${body}`;
-        }
-    }
-    body = body || '';
-    if (maxLength > 0 && body.length > maxLength) {
-        body = body.substring(0, maxLength) + `\n\n[Truncated: ${body.length - maxLength} characters omitted]`;
-    }
-    return body;
-}
 
 /**
  * Build a multipart/mixed batch request body for the Gmail batch API.
